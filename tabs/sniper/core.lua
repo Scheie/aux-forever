@@ -122,6 +122,104 @@ function M.judge(unit_price, usual, vendor, days, percent, min_profit, market)
     end
 end
 
+-- 0.9.1: why judge said no, in judge's own order, for /aux debug sniper. Returns the reason and the
+-- percent of the price judged against (nil when there was none).
+function M.why_not(unit_price, usual, vendor, days, percent, min_profit, market)
+    vendor = vendor or 0
+    if not unit_price or unit_price <= 0 then
+        return 'no price'
+    end
+    local reference = usual and usual > 0 and max(usual, vendor) or nil
+    if vendor > 0 and unit_price < vendor then
+        return 'below vendor, profit too small', reference and aux.round(100 * unit_price / reference) or nil
+    end
+    if not reference then
+        return 'no usual price'
+    end
+    local pct = aux.round(100 * unit_price / reference)
+    if (days or 0) < MIN_DAYS then
+        return 'fewer than ' .. MIN_DAYS .. ' days of history', pct
+    end
+    if market and judge(unit_price, usual, vendor, days, percent, min_profit) then
+        return 'today\'s market is lower', pct
+    end
+    if 100 * unit_price / reference > percent then
+        return 'price above your percent', pct
+    end
+    return 'profit too small', pct
+end
+
+-- /aux debug sniper: what the Sniper did with every item since Start (or a settings change)
+local stats
+local function reset_stats()
+    stats = {since = time(), rounds = 0, items = 0, reasons = {}, candidates = 0, opened = {}, misses = {}}
+end
+reset_stats()
+
+local function tally(t, reason)
+    t[reason] = (t[reason] or 0) + 1
+end
+
+-- the closest misses (lowest percent) with enough history to count, at most 8
+local function note_miss(key, reason, pct, unit_price, where)
+    if not pct or reason == 'no usual price' then
+        return
+    end
+    local misses = stats.misses
+    if #misses >= 8 and pct >= misses[#misses].pct then
+        return
+    end
+    for i = #misses, 1, -1 do
+        if misses[i].key == key then
+            tremove(misses, i)
+        end
+    end
+    tinsert(misses, {key = key, reason = reason, pct = pct, price = unit_price, where = where})
+    sort(misses, function(a, b) return a.pct < b.pct end)
+    while #misses > 8 do
+        tremove(misses)
+    end
+end
+
+function M.debug_report()
+    local lines = {}
+    local function add(text) tinsert(lines, text) end
+    -- the saved variables (the global aux), not this module's aux
+    local faction_key = format('%s|%s', aux.realm_name(), UnitFactionGroup 'player')
+    local history_lines, complete_lines = 0, 0
+    for _, line in pairs(aux.faction_data.history) do
+        history_lines = history_lines + 1
+        local today_units = strmatch(line, '^%d+#%d*#%d*#(%d+)') and 1 or 0
+        local _, past = gsub(strmatch(line, '^[^#]*#[^#]*#[^#]*#[^#]*#(.*)$') or '', '%d+@%d+@%d+', '')
+        if today_units + past >= MIN_DAYS then
+            complete_lines = complete_lines + 1
+        end
+    end
+    add(format('Sniper since %s: %d rounds, %d items judged. Realm "%s", faction table %s; %d items in price history, %d with %d+ days.',
+        date('%H:%M', stats.since), stats.rounds, stats.items, aux.realm_name(),
+        _G.aux.faction[faction_key] == aux.faction_data and 'matches' or 'DOES NOT match',
+        history_lines, complete_lines, MIN_DAYS))
+    local percent, min_profit = aux.account_data.sniper_percent, aux.account_data.sniper_profit
+    add(format('Settings: at most %d%%, profit at least %s. Most days of history seen: %d (needs %d).',
+        percent, money.to_string(min_profit, true), history_days, MIN_DAYS))
+    add('Turned down on the item list:')
+    for reason, n in pairs(stats.reasons) do
+        add(format('  %s: %d', reason, n))
+    end
+    add(format('Possible deals opened: %d', stats.candidates))
+    for reason, n in pairs(stats.opened) do
+        add(format('  %s: %d', reason, n))
+    end
+    if stats.misses[1] then
+        add('Closest misses:')
+        for _, miss in ipairs(stats.misses) do
+            local name = GetItemInfo(tonumber(strmatch(miss.key, '^%d+'))) or miss.key
+            add(format('  %s at %s: %d%%, %s (%s)', name, money.to_string(miss.price, true), miss.pct, miss.reason, miss.where))
+        end
+    end
+    return lines
+end
+
 -- 0.8.2 (FB-036): today's market for one item, from its listings. The units at the cheapest price
 -- are the possible deal; the market is what the units above it ask: the middle price of their
 -- cheapest quarter (MARKET_NOW_SHARE). Hundreds listed just above the cheapest price make that the
@@ -311,6 +409,7 @@ function check_item(item_key, key, price, other_keys, round_reads, validator, ro
     local records = read_cached(item_key)
     if not records then
         known[key] = nil -- no answer: try again next round
+        tally(stats.opened, 'no answer from the auction house')
         return
     end
     known[key] = price
@@ -348,6 +447,7 @@ function check_item(item_key, key, price, other_keys, round_reads, validator, ro
     end
     local old = find_deal(key)
     if not cheapest then
+        tally(stats.opened, 'no buyout from another player')
         set_gone(old)
         return
     end
@@ -356,9 +456,15 @@ function check_item(item_key, key, price, other_keys, round_reads, validator, ro
     local reason, profit, pct = judge_record(cheapest, market)
     if not reason then
         -- the list showed a bid, or the cheap one sold meanwhile
+        local usual, vendor, days = item_facts(cheapest.price_key or cheapest.item_key, cheapest.item_id)
+        local unit_price = ceil(cheapest.unit_buyout_price)
+        local why, why_pct = why_not(unit_price, usual, vendor, days, aux.account_data.sniper_percent, aux.account_data.sniper_profit, market)
+        tally(stats.opened, why)
+        note_miss(key, why, why_pct, unit_price, 'opened')
         set_gone(old)
         return
     end
+    tally(stats.opened, 'deal')
     sort(tiers, function(a, b) return a.unit_buyout_price < b.unit_buyout_price end)
     -- only the units that are a deal can be bought here: the buy bar offered 20 Ironweb Spider Silk
     -- where 7 were below vendor price and the rest cost more (Tyler, 0.4.1)
@@ -696,11 +802,15 @@ function check_list(results, seen, validator, round_scope_id)
                 -- 0.8: prices are kept per ending (info.price_key), the list's key is a version
                 local price_key = info.item_key_price_key(result.itemKey)
                 local usual, vendor, days
+                stats.items = stats.items + 1
                 if price_key and price_key ~= key and aux.account_data.sniper_ignored[price_key] then
                     -- ignored by name (another version of an ignored gear name)
                     known[key] = price
+                    tally(stats.reasons, 'ignored')
                 elseif price_key then
                     usual, vendor, days = item_facts(price_key, result.itemKey.itemID)
+                else
+                    tally(stats.reasons, 'gear name not loaded yet')
                 end
                 if usual ~= nil or vendor ~= nil then
                     -- a possible deal counts as judged only once it is opened (check_item): a round
@@ -711,12 +821,20 @@ function check_list(results, seen, validator, round_scope_id)
                     if judge(price, usual, vendor, days, percent, min_profit, market) then
                         tinsert(candidates, result)
                         candidate_keys[#candidates] = price_key
-                    elseif not (market and judge(price, usual, vendor, days, percent, min_profit)) then
-                        -- review H-008, finding 5: an item refused only because of a remembered
-                        -- market is judged again next round (that memory may be gone by then);
-                        -- one refused against the usual price waits for its price to change
-                        known[key] = price
+                        stats.candidates = stats.candidates + 1
+                    else
+                        local why, why_pct = why_not(price, usual, vendor, days, percent, min_profit, market)
+                        tally(stats.reasons, why)
+                        note_miss(key, why, why_pct, price, 'item list')
+                        if not (market and judge(price, usual, vendor, days, percent, min_profit)) then
+                            -- review H-008, finding 5: an item refused only because of a remembered
+                            -- market is judged again next round (that memory may be gone by then);
+                            -- one refused against the usual price waits for its price to change
+                            known[key] = price
+                        end
                     end
+                elseif price_key then
+                    tally(stats.reasons, 'item not loaded yet')
                 end
             end
         end
@@ -808,6 +926,7 @@ function start_round()
             local whole = got_list and not (result and (result.no_list or result.partial_list))
             if got_list then
                 round = round + 1
+                stats.rounds = stats.rounds + 1
                 history_days_known = true
                 last_seconds = GetTime() - t0
             end
@@ -826,6 +945,7 @@ function start_round()
 end
 
 function M.start()
+    reset_stats()
     running = true
     next_round_at = GetTime()
     update_controls()
@@ -843,6 +963,7 @@ end
 
 -- the settings changed: every item is judged again
 function M.settings_changed()
+    reset_stats()
     aux.wipe(known)
     aux.wipe(markets)
     update_deals()

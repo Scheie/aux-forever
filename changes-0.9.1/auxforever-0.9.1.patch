@@ -1,0 +1,521 @@
+--- a/aux-addon.lua	2026-11-23 11:56:47
++++ b/aux-addon.lua	2026-11-23 11:56:47
+@@ -2,6 +2,7 @@
+ 
+ local post = require 'aux.tabs.post'
+ local gui = require 'aux.gui'
++local history = require 'aux.core.history'
+ 
+ function M.print(...)
+ 	DEFAULT_CHAT_FRAME:AddMessage(LIGHTYELLOW_FONT_COLOR_CODE .. '<auxForever> ' .. join(map({...}, tostring), ' '))
+@@ -39,7 +40,16 @@
+                 for _, f in ipairs(handlers3) do f(arg1, ...) end
+             end
+ 		elseif event == 'PLAYER_LOGIN' then
++            -- before anything reads the price history (core/history.lua takes it at login)
++            if join_realms({[realm_data] = true, [faction_data] = true, [character_data] = true}) then
++                realm_rejoined = true
++            end
+ 			for _, f in ipairs(handlers2) do f(arg1, ...) end
++            if realm_rejoined then
++                print('Your saved data is now one set for all ' .. realm_name() .. ' subrealms (prices, favorites and settings joined).')
++            elseif realm_name() == '' then
++                print('The game has not said which realm this is, so your saved prices are not loaded this session. /reload to load them.')
++            end
+             sort_item_names(account_data.auctionable_items)
+             print('loaded. aux by shirsig, re-imagined by a fan. /aux for help')
+             print(full_scan_reminder(account_data.replicate_time, time()))
+@@ -109,6 +119,178 @@
+     return saved
+ end
+ 
++-- 0.9.1: on Forever GetRealmName() can be empty while the addon loads (Seen 2026-11-22). aux then
++-- kept everything under a realm named "": a second, empty price history next to the real one, so
++-- the Sniper had no usual prices and found no deals, and favorite searches seemed gone. Saved data
++-- under "" is joined into the real realm's as soon as its name is known: at load, or else at login.
++-- (GetNormalizedRealmName is no fallback: it drops the spaces, which would be a third key.)
++-- Later the same day the game gave no realm name even after login, so aux has its own fallbacks.
++
++-- 0.9.1 (the player, 2026-11-23): Forever runs all of a region's realms of one kind as one realm,
++-- with subrealms under it ("CAMWOW EU4 Realm 7 PvE", "CAMWOW EU5 Realm 7 PvE" are both EU PvE), and
++-- they share the auction house. aux keeps one set of data per region and kind: realm_group gives
++-- "EU PvE" for both. A name not of that form (no region word, or no kind at its end) is kept whole.
++REGIONS = {EU = true, US = true, NA = true, OCE = true, KR = true, TW = true, CN = true}
++REALM_KINDS = {PVE = 'PvE', PVP = 'PvP', RP = 'RP', RPPVP = 'RPPvP'}
++function M.realm_group(name)
++    if not name or name == '' then
++        return ''
++    end
++    local region, kind
++    for word in string.gmatch(name, '%S+') do
++        local letters = strmatch(word, '^(%a+)%d*$')
++        if not region and letters and REGIONS[strupper(letters)] then
++            region = strupper(letters)
++        end
++        kind = REALM_KINDS[strupper(word)]
++    end
++    if region and kind then
++        return region .. ' ' .. kind
++    end
++    return name
++end
++
++-- The realm group aux keeps saved data under; "" only when nothing at all tells it. In order: the
++-- game's realm name (remembered, by realm ID, for when it is missing); the name remembered for this
++-- realm ID; the one realm group this account has saved data for; the last name the game gave.
++function M.realm_name()
++    local account = aux.account
++    local id = GetRealmID and GetRealmID() or 0
++    local name = GetRealmName()
++    if name and name ~= '' then
++        account.realm_names = account.realm_names or {}
++        if id and id > 0 then
++            account.realm_names[id] = name
++        end
++        account.last_realm = name
++        return realm_group(name)
++    end
++    local remembered = account.realm_names and id and account.realm_names[id]
++    if remembered then
++        return realm_group(remembered)
++    end
++    local only
++    for realm in pairs(aux.realm) do
++        local group = realm_group(realm)
++        if group ~= '' and group ~= only then
++            if only then
++                only = nil
++                break
++            end
++            only = group
++        end
++    end
++    return only or realm_group(account.last_realm)
++end
++
++-- fills in what keep lacks from other, table by table, except the keys in skip
++local function fill(keep, other, skip)
++    for k, v in pairs(other) do
++        if not (skip and skip[k]) then
++            if keep[k] == nil then
++                keep[k] = v
++            elseif type(keep[k]) == 'table' and type(v) == 'table' then
++                fill(keep[k], v)
++            end
++        end
++    end
++end
++
++-- searches are lists: other's are added after keep's, each filter once
++local function merge_searches(keep, other)
++    for _, search in ipairs(other or empty) do
++        if not any(keep, function(kept) return kept.filter_string == search.filter_string end) then
++            tinsert(keep, search)
++        end
++    end
++end
++
++local function merge_realm(keep, other)
++    keep.characters = keep.characters or {}
++    for name, seen in pairs(other.characters or empty) do
++        keep.characters[name] = max(keep.characters[name] or 0, seen)
++    end
++    keep.favorite_searches, keep.recent_searches = keep.favorite_searches or {}, keep.recent_searches or {}
++    merge_searches(keep.favorite_searches, other.favorite_searches)
++    merge_searches(keep.recent_searches, other.recent_searches)
++    fill(keep, other, {characters = true, favorite_searches = true, recent_searches = true})
++end
++
++local function merge_faction(keep, other)
++    keep.history = keep.history or {}
++    -- a history from before version 2 was thrown away at load anyway (see AUX_LOADED)
++    if other.history_version == 2 or other.history_version == 3 then
++        for key, line in pairs(other.history or empty) do
++            keep.history[key] = history.merge_lines(keep.history[key], line)
++        end
++    end
++    if other.price_keys_since then
++        keep.price_keys_since = min(keep.price_keys_since or other.price_keys_since, other.price_keys_since)
++    end
++    -- the old prices are looked over again at login (core/history.lua, forget_old_prices)
++    keep.history_trimmed = nil
++    fill(keep, other, {history = true, history_version = true, price_keys_since = true, history_trimmed = true})
++end
++
++local function merge_character(keep, other)
++    keep.bid_auction_ids = keep.bid_auction_ids or {}
++    for _, id in ipairs(other.bid_auction_ids or empty) do
++        if not key(keep.bid_auction_ids, id) then
++            tinsert(keep.bid_auction_ids, id)
++        end
++    end
++    fill(keep, other, {bid_auction_ids = true})
++end
++
++-- moves store[old_key] to store[new_key], merged with what is there. The table in use this session
++-- (in_use) is the one kept, since the tabs hold on to it; otherwise the one at new_key is kept.
++local function rekey(store, old_key, new_key, merge, in_use)
++    local old, new = store[old_key], store[new_key]
++    store[old_key] = nil
++    if not new then
++        store[new_key] = old
++    elseif in_use and in_use[old] then
++        merge(old, new)
++        store[new_key] = old
++    else
++        merge(new, old)
++    end
++end
++
++-- Joins saved data kept under a subrealm's whole name, or under "" (no name from the game), into its
++-- realm group's (realm_group); true when there was any. in_use: the session's tables (at login), nil
++-- while loading. Data under "" waits while the current group is not known either.
++function M.join_realms(in_use)
++    local current = realm_name()
++    local function target(realm)
++        if realm == '' then
++            return current ~= '' and current or nil
++        end
++        return realm_group(realm)
++    end
++    local found = false
++    -- the realm store's keys are realm names; the others' are "realm|faction" and "realm|character"
++    for _, entry in ipairs{{aux.realm, merge_realm, false}, {aux.faction, merge_faction, true}, {aux.character, merge_character, true}} do
++        local store, merge, with_rest = entry[1], entry[2], entry[3]
++        local moves = {}
++        for k in pairs(store) do
++            local realm, rest = k, ''
++            if with_rest then
++                realm, rest = strmatch(k, '^(.-)(|.*)$')
++            end
++            local group = realm and target(realm)
++            if group and group .. rest ~= k then
++                tinsert(moves, {k, group .. rest})
++            end
++        end
++        for _, move in ipairs(moves) do
++            rekey(store, move[1], move[2], merge, in_use)
++            found = true
++        end
++    end
++    return found
++end
++
+ function event.AUX_LOADED()
+     _G.aux = aux or {}
+     assign(aux, {
+@@ -117,6 +299,9 @@
+         faction = {},
+         character = {},
+     })
++    -- subrealms' data joined into their realm group's; data under "" waits for login if the realm is
++    -- not known yet (join_realms)
++    realm_rejoined = join_realms()
+     M.account_data = assign(aux.account, {
+         scale = 1,
+         ignore_owner = true,
+@@ -154,12 +339,12 @@
+         merchant_buy = {},
+     })
+     do
+-        local key = format('%s|%s', GetRealmName(), UnitName'player')
++        local key = format('%s|%s', realm_name(), UnitName'player')
+         aux.character[key] = aux.character[key] or {}
+         M.character_data = character_settings(aux.character[key])
+     end
+     do
+-        local key = GetRealmName()
++        local key = realm_name()
+         aux.realm[key] = aux.realm[key] or {}
+         M.realm_data = assign(aux.realm[key], {
+             characters = {},
+@@ -168,7 +353,7 @@
+         })
+     end
+     do
+-        local key = format('%s|%s', GetRealmName(), UnitFactionGroup 'player')
++        local key = format('%s|%s', realm_name(), UnitFactionGroup 'player')
+         aux.faction[key] = aux.faction[key] or {}
+         M.faction_data = assign(aux.faction[key], {
+             history = {},
+--- a/core/history.lua	2026-11-23 11:56:47
++++ b/core/history.lua	2026-11-23 11:56:47
+@@ -211,6 +211,52 @@
+ 		value_cache[item_key] = nil
+ 	end
+ 	retire_plain(item_key)
++end
++
++-- 0.9.1: two saved lines of one item as one line (the same realm's prices saved under two realm
++-- names, see aux-addon.lua). Every day either line knows is kept; on a day both know, a complete
++-- look's market wins and the lower lowest price is kept. The newest day becomes the "today" fields
++-- (read_record moves it into the past days once that day is over).
++function M.merge_lines(a, b)
++	if not a or not b then
++		return a or b
++	end
++	local days, order = {}, {}
++	local function add(day, low, market, units)
++		local known = days[day]
++		if not known then
++			days[day] = { low = low, market = market, units = market and units or nil }
++			tinsert(order, day)
++			return
++		end
++		if market and not known.market then
++			known.market, known.units = market, units
++		end
++		if low and (not known.low or low < known.low) then
++			known.low = low
++		end
++	end
++	for _, str in ipairs{a, b} do
++		local record = unpack_record(str)
++		if record.low or record.market then
++			add(record.day, record.low, record.market, record.units)
++		end
++		for _, point in ipairs(record.points or empty) do
++			-- a past day's price is its market when it has units, else its lowest
++			add(point.day, not point.units and point.value or nil, point.units and point.value or nil, point.units)
++		end
++	end
++	if not order[1] then
++		return a
++	end
++	sort(order, function(x, y) return x > y end)
++	local newest = days[order[1]]
++	local merged = { day = order[1], low = newest.low, market = newest.market, units = newest.units, points = {} }
++	for i = 2, min(#order, MAX_POINTS + 1) do
++		local day = days[order[i]]
++		tinsert(merged.points, { day = order[i], value = day.market or day.low, units = day.market and day.units or nil })
++	end
++	return persistence.write(history_schema, merged)
+ end
+ 
+ -- the day's price for the record: its market price, else its lowest
+--- a/core/slash.lua	2026-11-23 11:56:47
++++ b/core/slash.lua	2026-11-23 11:56:47
+@@ -66,6 +66,10 @@
+         else
+             scan.measure_item_list()
+         end
++    elseif arguments[1] == 'debug' and arguments[2] == 'sniper' then
++        for _, line in ipairs(require('aux.tabs.sniper').debug_report()) do
++            aux.print(line)
++        end
+     elseif arguments[1] == 'price' then
+         -- auxForever (0.5): /aux price <item link or exact name>
+         local target = strmatch(command, '^%s*price%s+(.-)%s*$') or ''
+@@ -264,6 +268,7 @@
+ 		aux.print('- clear item cache')
+ 		aux.print('- debug [' .. status(aux.account_data.debug_timing) .. '] (search timing log)')
+ 		aux.print('- debug list (times the item list of the whole auction house)')
++		aux.print('- debug sniper (why the Sniper turned items down)')
+ 		aux.print('- memory (how much memory aux uses)')
+ 		aux.print('- price <item> (what aux has recorded for an item)')
+         aux.print('- clear post')
+--- a/tabs/sniper/core.lua	2026-11-23 11:56:47
++++ b/tabs/sniper/core.lua	2026-11-23 11:56:47
+@@ -122,6 +122,104 @@
+     end
+ end
+ 
++-- 0.9.1: why judge said no, in judge's own order, for /aux debug sniper. Returns the reason and the
++-- percent of the price judged against (nil when there was none).
++function M.why_not(unit_price, usual, vendor, days, percent, min_profit, market)
++    vendor = vendor or 0
++    if not unit_price or unit_price <= 0 then
++        return 'no price'
++    end
++    local reference = usual and usual > 0 and max(usual, vendor) or nil
++    if vendor > 0 and unit_price < vendor then
++        return 'below vendor, profit too small', reference and aux.round(100 * unit_price / reference) or nil
++    end
++    if not reference then
++        return 'no usual price'
++    end
++    local pct = aux.round(100 * unit_price / reference)
++    if (days or 0) < MIN_DAYS then
++        return 'fewer than ' .. MIN_DAYS .. ' days of history', pct
++    end
++    if market and judge(unit_price, usual, vendor, days, percent, min_profit) then
++        return 'today\'s market is lower', pct
++    end
++    if 100 * unit_price / reference > percent then
++        return 'price above your percent', pct
++    end
++    return 'profit too small', pct
++end
++
++-- /aux debug sniper: what the Sniper did with every item since Start (or a settings change)
++local stats
++local function reset_stats()
++    stats = {since = time(), rounds = 0, items = 0, reasons = {}, candidates = 0, opened = {}, misses = {}}
++end
++reset_stats()
++
++local function tally(t, reason)
++    t[reason] = (t[reason] or 0) + 1
++end
++
++-- the closest misses (lowest percent) with enough history to count, at most 8
++local function note_miss(key, reason, pct, unit_price, where)
++    if not pct or reason == 'no usual price' then
++        return
++    end
++    local misses = stats.misses
++    if #misses >= 8 and pct >= misses[#misses].pct then
++        return
++    end
++    for i = #misses, 1, -1 do
++        if misses[i].key == key then
++            tremove(misses, i)
++        end
++    end
++    tinsert(misses, {key = key, reason = reason, pct = pct, price = unit_price, where = where})
++    sort(misses, function(a, b) return a.pct < b.pct end)
++    while #misses > 8 do
++        tremove(misses)
++    end
++end
++
++function M.debug_report()
++    local lines = {}
++    local function add(text) tinsert(lines, text) end
++    -- the saved variables (the global aux), not this module's aux
++    local faction_key = format('%s|%s', aux.realm_name(), UnitFactionGroup 'player')
++    local history_lines, complete_lines = 0, 0
++    for _, line in pairs(aux.faction_data.history) do
++        history_lines = history_lines + 1
++        local today_units = strmatch(line, '^%d+#%d*#%d*#(%d+)') and 1 or 0
++        local _, past = gsub(strmatch(line, '^[^#]*#[^#]*#[^#]*#[^#]*#(.*)$') or '', '%d+@%d+@%d+', '')
++        if today_units + past >= MIN_DAYS then
++            complete_lines = complete_lines + 1
++        end
++    end
++    add(format('Sniper since %s: %d rounds, %d items judged. Realm "%s", faction table %s; %d items in price history, %d with %d+ days.',
++        date('%H:%M', stats.since), stats.rounds, stats.items, aux.realm_name(),
++        _G.aux.faction[faction_key] == aux.faction_data and 'matches' or 'DOES NOT match',
++        history_lines, complete_lines, MIN_DAYS))
++    local percent, min_profit = aux.account_data.sniper_percent, aux.account_data.sniper_profit
++    add(format('Settings: at most %d%%, profit at least %s. Most days of history seen: %d (needs %d).',
++        percent, money.to_string(min_profit, true), history_days, MIN_DAYS))
++    add('Turned down on the item list:')
++    for reason, n in pairs(stats.reasons) do
++        add(format('  %s: %d', reason, n))
++    end
++    add(format('Possible deals opened: %d', stats.candidates))
++    for reason, n in pairs(stats.opened) do
++        add(format('  %s: %d', reason, n))
++    end
++    if stats.misses[1] then
++        add('Closest misses:')
++        for _, miss in ipairs(stats.misses) do
++            local name = GetItemInfo(tonumber(strmatch(miss.key, '^%d+'))) or miss.key
++            add(format('  %s at %s: %d%%, %s (%s)', name, money.to_string(miss.price, true), miss.pct, miss.reason, miss.where))
++        end
++    end
++    return lines
++end
++
+ -- 0.8.2 (FB-036): today's market for one item, from its listings. The units at the cheapest price
+ -- are the possible deal; the market is what the units above it ask: the middle price of their
+ -- cheapest quarter (MARKET_NOW_SHARE). Hundreds listed just above the cheapest price make that the
+@@ -311,6 +409,7 @@
+     local records = read_cached(item_key)
+     if not records then
+         known[key] = nil -- no answer: try again next round
++        tally(stats.opened, 'no answer from the auction house')
+         return
+     end
+     known[key] = price
+@@ -348,6 +447,7 @@
+     end
+     local old = find_deal(key)
+     if not cheapest then
++        tally(stats.opened, 'no buyout from another player')
+         set_gone(old)
+         return
+     end
+@@ -356,9 +456,15 @@
+     local reason, profit, pct = judge_record(cheapest, market)
+     if not reason then
+         -- the list showed a bid, or the cheap one sold meanwhile
++        local usual, vendor, days = item_facts(cheapest.price_key or cheapest.item_key, cheapest.item_id)
++        local unit_price = ceil(cheapest.unit_buyout_price)
++        local why, why_pct = why_not(unit_price, usual, vendor, days, aux.account_data.sniper_percent, aux.account_data.sniper_profit, market)
++        tally(stats.opened, why)
++        note_miss(key, why, why_pct, unit_price, 'opened')
+         set_gone(old)
+         return
+     end
++    tally(stats.opened, 'deal')
+     sort(tiers, function(a, b) return a.unit_buyout_price < b.unit_buyout_price end)
+     -- only the units that are a deal can be bought here: the buy bar offered 20 Ironweb Spider Silk
+     -- where 7 were below vendor price and the rest cost more (Tyler, 0.4.1)
+@@ -696,11 +802,15 @@
+                 -- 0.8: prices are kept per ending (info.price_key), the list's key is a version
+                 local price_key = info.item_key_price_key(result.itemKey)
+                 local usual, vendor, days
++                stats.items = stats.items + 1
+                 if price_key and price_key ~= key and aux.account_data.sniper_ignored[price_key] then
+                     -- ignored by name (another version of an ignored gear name)
+                     known[key] = price
++                    tally(stats.reasons, 'ignored')
+                 elseif price_key then
+                     usual, vendor, days = item_facts(price_key, result.itemKey.itemID)
++                else
++                    tally(stats.reasons, 'gear name not loaded yet')
+                 end
+                 if usual ~= nil or vendor ~= nil then
+                     -- a possible deal counts as judged only once it is opened (check_item): a round
+@@ -711,12 +821,20 @@
+                     if judge(price, usual, vendor, days, percent, min_profit, market) then
+                         tinsert(candidates, result)
+                         candidate_keys[#candidates] = price_key
+-                    elseif not (market and judge(price, usual, vendor, days, percent, min_profit)) then
+-                        -- review H-008, finding 5: an item refused only because of a remembered
+-                        -- market is judged again next round (that memory may be gone by then);
+-                        -- one refused against the usual price waits for its price to change
+-                        known[key] = price
++                        stats.candidates = stats.candidates + 1
++                    else
++                        local why, why_pct = why_not(price, usual, vendor, days, percent, min_profit, market)
++                        tally(stats.reasons, why)
++                        note_miss(key, why, why_pct, price, 'item list')
++                        if not (market and judge(price, usual, vendor, days, percent, min_profit)) then
++                            -- review H-008, finding 5: an item refused only because of a remembered
++                            -- market is judged again next round (that memory may be gone by then);
++                            -- one refused against the usual price waits for its price to change
++                            known[key] = price
++                        end
+                     end
++                elseif price_key then
++                    tally(stats.reasons, 'item not loaded yet')
+                 end
+             end
+         end
+@@ -808,6 +926,7 @@
+             local whole = got_list and not (result and (result.no_list or result.partial_list))
+             if got_list then
+                 round = round + 1
++                stats.rounds = stats.rounds + 1
+                 history_days_known = true
+                 last_seconds = GetTime() - t0
+             end
+@@ -826,6 +945,7 @@
+ end
+ 
+ function M.start()
++    reset_stats()
+     running = true
+     next_round_at = GetTime()
+     update_controls()
+@@ -843,6 +963,7 @@
+ 
+ -- the settings changed: every item is judged again
+ function M.settings_changed()
++    reset_stats()
+     aux.wipe(known)
+     aux.wipe(markets)
+     update_deals()

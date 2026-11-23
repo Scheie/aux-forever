@@ -213,6 +213,52 @@ function write_record(item_key, record)
 	retire_plain(item_key)
 end
 
+-- 0.9.1: two saved lines of one item as one line (the same realm's prices saved under two realm
+-- names, see aux-addon.lua). Every day either line knows is kept; on a day both know, a complete
+-- look's market wins and the lower lowest price is kept. The newest day becomes the "today" fields
+-- (read_record moves it into the past days once that day is over).
+function M.merge_lines(a, b)
+	if not a or not b then
+		return a or b
+	end
+	local days, order = {}, {}
+	local function add(day, low, market, units)
+		local known = days[day]
+		if not known then
+			days[day] = { low = low, market = market, units = market and units or nil }
+			tinsert(order, day)
+			return
+		end
+		if market and not known.market then
+			known.market, known.units = market, units
+		end
+		if low and (not known.low or low < known.low) then
+			known.low = low
+		end
+	end
+	for _, str in ipairs{a, b} do
+		local record = unpack_record(str)
+		if record.low or record.market then
+			add(record.day, record.low, record.market, record.units)
+		end
+		for _, point in ipairs(record.points or empty) do
+			-- a past day's price is its market when it has units, else its lowest
+			add(point.day, not point.units and point.value or nil, point.units and point.value or nil, point.units)
+		end
+	end
+	if not order[1] then
+		return a
+	end
+	sort(order, function(x, y) return x > y end)
+	local newest = days[order[1]]
+	local merged = { day = order[1], low = newest.low, market = newest.market, units = newest.units, points = {} }
+	for i = 2, min(#order, MAX_POINTS + 1) do
+		local day = days[order[i]]
+		tinsert(merged.points, { day = order[i], value = day.market or day.low, units = day.market and day.units or nil })
+	end
+	return persistence.write(history_schema, merged)
+end
+
 -- the day's price for the record: its market price, else its lowest
 local function day_price(record)
 	return record.market or record.low

@@ -2,6 +2,7 @@ select(2, ...) 'aux'
 
 local post = require 'aux.tabs.post'
 local gui = require 'aux.gui'
+local history = require 'aux.core.history'
 
 function M.print(...)
 	DEFAULT_CHAT_FRAME:AddMessage(LIGHTYELLOW_FONT_COLOR_CODE .. '<auxForever> ' .. join(map({...}, tostring), ' '))
@@ -39,7 +40,16 @@ do
                 for _, f in ipairs(handlers3) do f(arg1, ...) end
             end
 		elseif event == 'PLAYER_LOGIN' then
+            -- before anything reads the price history (core/history.lua takes it at login)
+            if join_realms({[realm_data] = true, [faction_data] = true, [character_data] = true}) then
+                realm_rejoined = true
+            end
 			for _, f in ipairs(handlers2) do f(arg1, ...) end
+            if realm_rejoined then
+                print('Your saved data is now one set for all ' .. realm_name() .. ' subrealms (prices, favorites and settings joined).')
+            elseif realm_name() == '' then
+                print('The game has not said which realm this is, so your saved prices are not loaded this session. /reload to load them.')
+            end
             sort_item_names(account_data.auctionable_items)
             print('loaded. aux by shirsig, re-imagined by a fan. /aux for help')
             print(full_scan_reminder(account_data.replicate_time, time()))
@@ -109,6 +119,178 @@ function M.character_settings(saved)
     return saved
 end
 
+-- 0.9.1: on Forever GetRealmName() can be empty while the addon loads (Seen 2026-11-22). aux then
+-- kept everything under a realm named "": a second, empty price history next to the real one, so
+-- the Sniper had no usual prices and found no deals, and favorite searches seemed gone. Saved data
+-- under "" is joined into the real realm's as soon as its name is known: at load, or else at login.
+-- (GetNormalizedRealmName is no fallback: it drops the spaces, which would be a third key.)
+-- Later the same day the game gave no realm name even after login, so aux has its own fallbacks.
+
+-- 0.9.1 (the player, 2026-11-23): Forever runs all of a region's realms of one kind as one realm,
+-- with subrealms under it ("CAMWOW EU4 Realm 7 PvE", "CAMWOW EU5 Realm 7 PvE" are both EU PvE), and
+-- they share the auction house. aux keeps one set of data per region and kind: realm_group gives
+-- "EU PvE" for both. A name not of that form (no region word, or no kind at its end) is kept whole.
+REGIONS = {EU = true, US = true, NA = true, OCE = true, KR = true, TW = true, CN = true}
+REALM_KINDS = {PVE = 'PvE', PVP = 'PvP', RP = 'RP', RPPVP = 'RPPvP'}
+function M.realm_group(name)
+    if not name or name == '' then
+        return ''
+    end
+    local region, kind
+    for word in string.gmatch(name, '%S+') do
+        local letters = strmatch(word, '^(%a+)%d*$')
+        if not region and letters and REGIONS[strupper(letters)] then
+            region = strupper(letters)
+        end
+        kind = REALM_KINDS[strupper(word)]
+    end
+    if region and kind then
+        return region .. ' ' .. kind
+    end
+    return name
+end
+
+-- The realm group aux keeps saved data under; "" only when nothing at all tells it. In order: the
+-- game's realm name (remembered, by realm ID, for when it is missing); the name remembered for this
+-- realm ID; the one realm group this account has saved data for; the last name the game gave.
+function M.realm_name()
+    local account = aux.account
+    local id = GetRealmID and GetRealmID() or 0
+    local name = GetRealmName()
+    if name and name ~= '' then
+        account.realm_names = account.realm_names or {}
+        if id and id > 0 then
+            account.realm_names[id] = name
+        end
+        account.last_realm = name
+        return realm_group(name)
+    end
+    local remembered = account.realm_names and id and account.realm_names[id]
+    if remembered then
+        return realm_group(remembered)
+    end
+    local only
+    for realm in pairs(aux.realm) do
+        local group = realm_group(realm)
+        if group ~= '' and group ~= only then
+            if only then
+                only = nil
+                break
+            end
+            only = group
+        end
+    end
+    return only or realm_group(account.last_realm)
+end
+
+-- fills in what keep lacks from other, table by table, except the keys in skip
+local function fill(keep, other, skip)
+    for k, v in pairs(other) do
+        if not (skip and skip[k]) then
+            if keep[k] == nil then
+                keep[k] = v
+            elseif type(keep[k]) == 'table' and type(v) == 'table' then
+                fill(keep[k], v)
+            end
+        end
+    end
+end
+
+-- searches are lists: other's are added after keep's, each filter once
+local function merge_searches(keep, other)
+    for _, search in ipairs(other or empty) do
+        if not any(keep, function(kept) return kept.filter_string == search.filter_string end) then
+            tinsert(keep, search)
+        end
+    end
+end
+
+local function merge_realm(keep, other)
+    keep.characters = keep.characters or {}
+    for name, seen in pairs(other.characters or empty) do
+        keep.characters[name] = max(keep.characters[name] or 0, seen)
+    end
+    keep.favorite_searches, keep.recent_searches = keep.favorite_searches or {}, keep.recent_searches or {}
+    merge_searches(keep.favorite_searches, other.favorite_searches)
+    merge_searches(keep.recent_searches, other.recent_searches)
+    fill(keep, other, {characters = true, favorite_searches = true, recent_searches = true})
+end
+
+local function merge_faction(keep, other)
+    keep.history = keep.history or {}
+    -- a history from before version 2 was thrown away at load anyway (see AUX_LOADED)
+    if other.history_version == 2 or other.history_version == 3 then
+        for key, line in pairs(other.history or empty) do
+            keep.history[key] = history.merge_lines(keep.history[key], line)
+        end
+    end
+    if other.price_keys_since then
+        keep.price_keys_since = min(keep.price_keys_since or other.price_keys_since, other.price_keys_since)
+    end
+    -- the old prices are looked over again at login (core/history.lua, forget_old_prices)
+    keep.history_trimmed = nil
+    fill(keep, other, {history = true, history_version = true, price_keys_since = true, history_trimmed = true})
+end
+
+local function merge_character(keep, other)
+    keep.bid_auction_ids = keep.bid_auction_ids or {}
+    for _, id in ipairs(other.bid_auction_ids or empty) do
+        if not key(keep.bid_auction_ids, id) then
+            tinsert(keep.bid_auction_ids, id)
+        end
+    end
+    fill(keep, other, {bid_auction_ids = true})
+end
+
+-- moves store[old_key] to store[new_key], merged with what is there. The table in use this session
+-- (in_use) is the one kept, since the tabs hold on to it; otherwise the one at new_key is kept.
+local function rekey(store, old_key, new_key, merge, in_use)
+    local old, new = store[old_key], store[new_key]
+    store[old_key] = nil
+    if not new then
+        store[new_key] = old
+    elseif in_use and in_use[old] then
+        merge(old, new)
+        store[new_key] = old
+    else
+        merge(new, old)
+    end
+end
+
+-- Joins saved data kept under a subrealm's whole name, or under "" (no name from the game), into its
+-- realm group's (realm_group); true when there was any. in_use: the session's tables (at login), nil
+-- while loading. Data under "" waits while the current group is not known either.
+function M.join_realms(in_use)
+    local current = realm_name()
+    local function target(realm)
+        if realm == '' then
+            return current ~= '' and current or nil
+        end
+        return realm_group(realm)
+    end
+    local found = false
+    -- the realm store's keys are realm names; the others' are "realm|faction" and "realm|character"
+    for _, entry in ipairs{{aux.realm, merge_realm, false}, {aux.faction, merge_faction, true}, {aux.character, merge_character, true}} do
+        local store, merge, with_rest = entry[1], entry[2], entry[3]
+        local moves = {}
+        for k in pairs(store) do
+            local realm, rest = k, ''
+            if with_rest then
+                realm, rest = strmatch(k, '^(.-)(|.*)$')
+            end
+            local group = realm and target(realm)
+            if group and group .. rest ~= k then
+                tinsert(moves, {k, group .. rest})
+            end
+        end
+        for _, move in ipairs(moves) do
+            rekey(store, move[1], move[2], merge, in_use)
+            found = true
+        end
+    end
+    return found
+end
+
 function event.AUX_LOADED()
     _G.aux = aux or {}
     assign(aux, {
@@ -117,6 +299,9 @@ function event.AUX_LOADED()
         faction = {},
         character = {},
     })
+    -- subrealms' data joined into their realm group's; data under "" waits for login if the realm is
+    -- not known yet (join_realms)
+    realm_rejoined = join_realms()
     M.account_data = assign(aux.account, {
         scale = 1,
         ignore_owner = true,
@@ -154,12 +339,12 @@ function event.AUX_LOADED()
         merchant_buy = {},
     })
     do
-        local key = format('%s|%s', GetRealmName(), UnitName'player')
+        local key = format('%s|%s', realm_name(), UnitName'player')
         aux.character[key] = aux.character[key] or {}
         M.character_data = character_settings(aux.character[key])
     end
     do
-        local key = GetRealmName()
+        local key = realm_name()
         aux.realm[key] = aux.realm[key] or {}
         M.realm_data = assign(aux.realm[key], {
             characters = {},
@@ -168,7 +353,7 @@ function event.AUX_LOADED()
         })
     end
     do
-        local key = format('%s|%s', GetRealmName(), UnitFactionGroup 'player')
+        local key = format('%s|%s', realm_name(), UnitFactionGroup 'player')
         aux.faction[key] = aux.faction[key] or {}
         M.faction_data = assign(aux.faction[key], {
             history = {},

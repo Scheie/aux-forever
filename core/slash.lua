@@ -66,6 +66,10 @@ function SlashCmdList.AUX(command)
         else
             scan.measure_item_list()
         end
+    elseif arguments[1] == 'debug' and arguments[2] == 'sniper' then
+        for _, line in ipairs(require('aux.tabs.sniper').debug_report()) do
+            aux.print(line)
+        end
     elseif arguments[1] == 'price' then
         -- auxForever (0.5): /aux price <item link or exact name>
         local target = strmatch(command, '^%s*price%s+(.-)%s*$') or ''
@@ -264,6 +268,7 @@ function SlashCmdList.AUX(command)
 		aux.print('- clear item cache')
 		aux.print('- debug [' .. status(aux.account_data.debug_timing) .. '] (search timing log)')
 		aux.print('- debug list (times the item list of the whole auction house)')
+		aux.print('- debug sniper (why the Sniper turned items down)')
 		aux.print('- memory (how much memory aux uses)')
 		aux.print('- price <item> (what aux has recorded for an item)')
         aux.print('- clear post')
