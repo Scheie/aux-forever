@@ -1,3 +1,14 @@
+--- a/auxForever.toc	2026-11-23 12:37:26
++++ b/auxForever.toc	2026-11-23 12:37:26
+@@ -1,7 +1,7 @@
+ ## Interface: 16001
+ ## Author: shirsig
+ ## Title: auxForever
+-## Version: forever-0.9
++## Version: forever-0.9.1
+ ## Notes: aux by shirsig, re-imagined by a fan
+ ## SavedVariables: aux
+ 
 --- a/aux-addon.lua	2026-11-23 11:56:47
 +++ b/aux-addon.lua	2026-11-23 11:56:47
 @@ -2,6 +2,7 @@

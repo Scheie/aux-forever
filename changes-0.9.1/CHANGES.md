@@ -6,7 +6,7 @@ Files in this folder:
 
 | File | What it is |
 |---|---|
-| `auxforever-0.9.1.patch` | Unified diff of all code changes (4 files, +365 / -8). |
+| `auxforever-0.9.1.patch` | Unified diff of all code changes (5 files, +368 / -9). |
 | `CHANGES.md` | This document. |
 | `merge_accounts.lua` | One-off offline script that merges one WoW account's price history into another's (not part of the addon). |
 | `sync/` | Automatic price history sync between WoW accounts, for macOS and Windows: `sync.lua`, the macOS launchd job, and the Windows watcher and installer (not part of the addon; see "Sync between WoW accounts"). |
@@ -46,6 +46,10 @@ They share an auction house per faction, so aux should keep one set of data per 
 type. Horde and Alliance auction houses are separate, so the faction stays part of the key.
 
 ## Changes by file
+
+### 0. `auxForever.toc`
+
+`## Version: forever-0.9` becomes `## Version: forever-0.9.1` (shown in game; `frame.lua` reads it).
 
 ### 1. `aux-addon.lua`: realm key, subrealm grouping, joining old data
 
