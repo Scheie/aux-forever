@@ -215,8 +215,9 @@ end
 
 -- 0.9.1: two saved lines of one item as one line (the same realm's prices saved under two realm
 -- names, see aux-addon.lua). Every day either line knows is kept; on a day both know, a complete
--- look's market wins and the lower lowest price is kept. The newest day becomes the "today" fields
--- (read_record moves it into the past days once that day is over).
+-- look's market wins (of two, the one that saw more units; ties: the lower price), and the lower
+-- lowest price is kept, so the order of the two lines does not matter. The newest day becomes the
+-- "today" fields (read_record moves it into the past days once that day is over).
 function M.merge_lines(a, b)
 	if not a or not b then
 		return a or b
@@ -229,7 +230,8 @@ function M.merge_lines(a, b)
 			tinsert(order, day)
 			return
 		end
-		if market and not known.market then
+		if market and (not known.market or (units or 0) > (known.units or 0)
+			or (units or 0) == (known.units or 0) and market < known.market) then
 			known.market, known.units = market, units
 		end
 		if low and (not known.low or low < known.low) then

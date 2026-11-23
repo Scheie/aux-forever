@@ -9,6 +9,7 @@ Files in this folder:
 | `auxforever-0.9.1.patch` | Unified diff of all code changes (4 files, +365 / -8). |
 | `CHANGES.md` | This document. |
 | `merge_accounts.lua` | One-off offline script that merges one WoW account's price history into another's (not part of the addon). |
+| `sync/` | Automatic price history sync between WoW accounts: `sync.lua` and its macOS launchd job (not part of the addon; see "Sync between WoW accounts"). |
 
 ## Applying
 
@@ -114,7 +115,8 @@ Added after `write_record`. It merges two saved history lines of one item into o
 - If one of the two is nil, the other is returned unchanged (no unpacking).
 - Every day that either line knows is kept: the "today" fields and the past `points`.
 - On a day both know, a market (a complete look, with units) beats a lowest price only, and the
-  lower lowest price is kept. If both have a market, the first one's is kept.
+  lower lowest price is kept. If both have a market, the one from the look that saw more units is
+  kept; on a tie, the lower price. The result does not depend on the order of the two lines.
 - The newest day becomes the `day/low/market/units` fields (`read_record` moves it into the past
   days once that day is over). At most `MAX_POINTS` past days are kept.
 - Old 0.4 lines are handled through `unpack_record` (`convert_old`).
@@ -175,6 +177,62 @@ This adds no behaviour change to the Sniper's deal finding; it only counts.
 
   Back up both files, then copy the output over the target file.
 
+## Sync between WoW accounts (`sync/`)
+
+WoW gives each WoW account in a Battle.net login its own saved file, and an addon cannot read
+another account's file. `sync/sync.lua` keeps the price history the same across all of them. It
+works with both games running at once.
+
+**How it works.** launchd runs the script whenever a `SavedVariables` folder changes, that is,
+whenever a game saves (logout, exit, `/reload`). The script:
+
+1. finds every `WTF/Account/*/SavedVariables/auxForever.lua`;
+2. waits until none has been written for 3 seconds;
+3. merges the price history of all of them, per realm group and faction (Alliance only with
+   Alliance, Horde only with Horde), using the same rules as `history.merge_lines`;
+4. writes the merged history into every file that lacks some of it.
+
+Only `aux.faction[...].history` is synced. Settings, favorites, Post data and character data stay
+per account.
+
+- **Union:** a running game overwrites its own file at its next save, but the other files keep
+  everything, and the run after that save restores the full set. Nothing is lost.
+- **When a running game sees the merged prices:** only when it enters the world again. Log out to
+  character select, wait a few seconds, then log in. `/reload` is not enough, because WoW saves
+  first and then reads back what it just wrote.
+- **Safety:**
+  - A file is only written when it gains something. A `state` file of mtimes and sizes ends runs
+    caused by the script's own writes, so it does not loop.
+  - Writes go through a temporary file that must read back identical before it replaces the
+    original.
+  - The last 5 versions of each account's file are kept in `backups/`.
+  - A half-written or unreadable file is skipped untouched.
+  - A file that changes during the merge is left for the next run.
+- **Logs:** `sync.log` (one line per write, plus skips and errors) and `launchd.log`, both in the
+  state folder.
+- **Checked:** the script's `merge_lines` gives the same result as the addon's on all 17,577
+  items both accounts shared, merging twice changes nothing, and the result does not depend on
+  the order of the files.
+
+**Install (macOS):**
+
+```sh
+mkdir -p ~/Library/Application\ Support/auxForever-sync/backups
+cp sync/sync.lua ~/Library/Application\ Support/auxForever-sync/
+cp sync/no.auxforever.sync.plist ~/Library/LaunchAgents/
+# edit the plist first: the lua path (`which lua`), the home folder in the paths, and one
+# WatchPaths entry per WTF/Account/<account>/SavedVariables folder
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/no.auxforever.sync.plist
+```
+
+**Turn off:** `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/no.auxforever.sync.plist`
+(delete the plist so it does not come back at the next Mac login).
+
+**Run by hand:** `lua sync.lua "<WoW>/_forever_/WTF/Account" [<state folder>]`
+
+When a new WoW account is added, add its `SavedVariables` folder to `WatchPaths` and load the job
+again. The script itself finds all accounts on its own.
+
 ## Testing done
 
 - `luac -p` on all changed files.
@@ -199,8 +257,8 @@ This adds no behaviour change to the Sniper's deal finding; it only counts.
 - `realm_group` takes the region and play type from the name's words. It assumes every
   `<region> <type>` subrealm shares one auction house per faction, whatever the `Realm <n>` part
   says.
-- If two subrealms both have a market for the same item on the same day, the merge keeps the
-  first one instead of combining them (they share an auction house, so the two should agree).
+- If two saved lines both have a market for the same item on the same day, the merge keeps the
+  one that saw more units instead of combining them.
 - The Nov 22 Full scan saved only lowest prices (169 of 23,061 items had a market), probably
   because it was stopped before its final step. This is unrelated to the patch: let a Full scan
   finish before closing the auction house.

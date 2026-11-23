@@ -239,8 +239,8 @@
          M.faction_data = assign(aux.faction[key], {
              history = {},
 --- a/core/history.lua	2026-11-23 11:56:47
-+++ b/core/history.lua	2026-11-23 11:56:47
-@@ -211,6 +211,52 @@
++++ b/core/history.lua	2026-11-23 12:30:07
+@@ -211,6 +211,54 @@
  		value_cache[item_key] = nil
  	end
  	retire_plain(item_key)
@@ -248,8 +248,9 @@
 +
 +-- 0.9.1: two saved lines of one item as one line (the same realm's prices saved under two realm
 +-- names, see aux-addon.lua). Every day either line knows is kept; on a day both know, a complete
-+-- look's market wins and the lower lowest price is kept. The newest day becomes the "today" fields
-+-- (read_record moves it into the past days once that day is over).
++-- look's market wins (of two, the one that saw more units; ties: the lower price), and the lower
++-- lowest price is kept, so the order of the two lines does not matter. The newest day becomes the
++-- "today" fields (read_record moves it into the past days once that day is over).
 +function M.merge_lines(a, b)
 +	if not a or not b then
 +		return a or b
@@ -262,7 +263,8 @@
 +			tinsert(order, day)
 +			return
 +		end
-+		if market and not known.market then
++		if market and (not known.market or (units or 0) > (known.units or 0)
++			or (units or 0) == (known.units or 0) and market < known.market) then
 +			known.market, known.units = market, units
 +		end
 +		if low and (not known.low or low < known.low) then
