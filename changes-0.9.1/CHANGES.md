@@ -9,7 +9,7 @@ Files in this folder:
 | `auxforever-0.9.1.patch` | Unified diff of all code changes (4 files, +365 / -8). |
 | `CHANGES.md` | This document. |
 | `merge_accounts.lua` | One-off offline script that merges one WoW account's price history into another's (not part of the addon). |
-| `sync/` | Automatic price history sync between WoW accounts: `sync.lua` and its macOS launchd job (not part of the addon; see "Sync between WoW accounts"). |
+| `sync/` | Automatic price history sync between WoW accounts, for macOS and Windows: `sync.lua`, the macOS launchd job, and the Windows watcher and installer (not part of the addon; see "Sync between WoW accounts"). |
 
 ## Applying
 
@@ -183,8 +183,9 @@ WoW gives each WoW account in a Battle.net login its own saved file, and an addo
 another account's file. `sync/sync.lua` keeps the price history the same across all of them. It
 works with both games running at once.
 
-**How it works.** launchd runs the script whenever a `SavedVariables` folder changes, that is,
-whenever a game saves (logout, exit, `/reload`). The script:
+**How it works.** The script runs whenever a game saves (logout, exit, `/reload`). On macOS,
+launchd starts it when a `SavedVariables` folder changes. On Windows, `watch.ps1` (started at logon
+by Task Scheduler) starts it when an `auxForever.lua` under `WTF\Account` changes. The script:
 
 1. finds every `WTF/Account/*/SavedVariables/auxForever.lua`;
 2. waits until none has been written for 3 seconds;
@@ -201,10 +202,12 @@ per account.
   character select, wait a few seconds, then log in. `/reload` is not enough, because WoW saves
   first and then reads back what it just wrote.
 - **Safety:**
-  - A file is only written when it gains something. A `state` file of mtimes and sizes ends runs
-    caused by the script's own writes, so it does not loop.
+  - A file is only written when it gains something. A `state` file of fingerprints (each file's
+    size and a hash of part of its content) ends runs caused by the script's own writes, so it does
+    not loop.
   - Writes go through a temporary file that must read back identical before it replaces the
-    original.
+    original. On Windows, which cannot rename over a file, the original is moved aside first and
+    put back if the swap fails.
   - The last 5 versions of each account's file are kept in `backups/`.
   - A half-written or unreadable file is skipped untouched.
   - A file that changes during the merge is left for the next run.
@@ -228,10 +231,34 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/no.auxforever.sync.plist
 **Turn off:** `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/no.auxforever.sync.plist`
 (delete the plist so it does not come back at the next Mac login).
 
-**Run by hand:** `lua sync.lua "<WoW>/_forever_/WTF/Account" [<state folder>]`
-
 When a new WoW account is added, add its `SavedVariables` folder to `WatchPaths` and load the job
 again. The script itself finds all accounts on its own.
+
+**Install (Windows):**
+
+1. Install Lua 5.3 or newer, for example `winget install DEVCOM.Lua`, then open a new PowerShell
+   window so `lua` is found.
+2. In the `sync` folder, run:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
+   # WoW somewhere else:
+   powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -WoW "D:\Games\World of Warcraft\_forever_"
+   ```
+
+   This copies `sync.lua` and `watch.ps1` to `%APPDATA%\auxForever-sync\`, registers the scheduled
+   task "auxForever sync" (at logon, hidden, restarted if it stops), and starts it. New WoW
+   accounts are picked up on their own (the watcher covers all of `WTF\Account`).
+
+**Turn off (Windows):** `Unregister-ScheduledTask -TaskName 'auxForever sync' -Confirm:$false`
+
+**Run by hand:** `lua sync.lua "<WoW>/_forever_/WTF/Account" [<state folder>]`. The state folder
+defaults to `~/Library/Application Support/auxForever-sync` (macOS) or
+`%APPDATA%\auxForever-sync` (Windows).
+
+**Windows status:** `sync.lua`'s Windows code (folder listing with `dir`, waiting with `ping`,
+moving the original aside before the swap) and the two PowerShell scripts have not been run on
+Windows yet. The swap logic was tested on its own; the rest was only tested on macOS.
 
 ## Testing done
 

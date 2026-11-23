@@ -1,11 +1,12 @@
--- auxForever price history sync between WoW accounts (union sync).
+-- auxForever price history sync between WoW accounts (union sync). macOS and Windows; Lua 5.3+.
 --
 -- usage: lua sync.lua <WTF/Account folder> [<state folder>]
 --
 -- Every WoW account has its own WTF/Account/<account>/SavedVariables/auxForever.lua, and an addon
 -- can only read its own account's file. This script runs whenever one of those files changes
--- (launchd, no.auxforever.sync.plist): it merges the price history of all accounts' files and writes
--- the merged history into every file that lacks some of it.
+-- (macOS: launchd, no.auxforever.sync.plist; Windows: watch.ps1, started by Task Scheduler): it
+-- merges the price history of all accounts' files and writes the merged history into every file
+-- that lacks some of it.
 --
 -- - Union, not one-way: a running game overwrites its own file at its next save, but the other files
 --   keep everything, and the next run (after that save) restores the full set. Nothing is lost.
@@ -18,17 +19,108 @@
 -- - A file is written only when it gains something, through a temporary file that is read back and
 --   checked before it replaces the original; the original is kept in backups/ (the last BACKUPS).
 
+local WINDOWS = package.config:sub(1, 1) == '\\'
 local WTF_ACCOUNTS = assert(arg[1], 'usage: lua sync.lua <WTF/Account folder> [<state folder>]')
-local HOME = arg[2] or (os.getenv('HOME') .. '/Library/Application Support/auxForever-sync')
+local HOME = arg[2] or (WINDOWS and (os.getenv('APPDATA') .. '/auxForever-sync')
+    or (os.getenv('HOME') .. '/Library/Application Support/auxForever-sync'))
 local FILE_NAME = 'auxForever.lua'
 local BACKUPS = 5
-local SETTLE_SECONDS = 3 -- a file must be this old before it is read (WoW done writing it)
-local SETTLE_WAIT = 60
+local SETTLE_SECONDS = 3 -- a file must stay the same this long before it is used (WoW done writing)
+local SETTLE_TRIES = 20
 local MAX_POINTS = 14 -- core/history.lua MAX_POINTS
 local LOG_LIMIT = 1024 * 1024
 
-local function shell_quote(s)
+-- system: the few things Lua cannot do by itself
+
+local function quote(s)
+    if WINDOWS then
+        return '"' .. s:gsub('/', '\\') .. '"'
+    end
     return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+local function command_lines(cmd)
+    local lines = {}
+    local p = io.popen(cmd)
+    if p then
+        for line in p:lines() do
+            lines[#lines + 1] = line
+        end
+        p:close()
+    end
+    return lines
+end
+
+-- names in a folder: folders only, or files only
+local function list(path, folders)
+    if WINDOWS then
+        return command_lines('dir /b ' .. (folders and '/ad ' or '/a-d ') .. quote(path) .. ' 2>nul')
+    end
+    return command_lines('find ' .. quote(path) .. ' -mindepth 1 -maxdepth 1 -type ' .. (folders and 'd' or 'f')
+        .. ' -exec basename {} \\; 2>/dev/null')
+end
+
+local function sleep(seconds)
+    if WINDOWS then
+        os.execute('ping -n ' .. (seconds + 1) .. ' 127.0.0.1 >nul')
+    else
+        os.execute('sleep ' .. seconds)
+    end
+end
+
+local function read_file(path)
+    local f = io.open(path, 'rb')
+    if not f then
+        return nil
+    end
+    local content = f:read('a')
+    f:close()
+    return content
+end
+
+local function write_file(path, content)
+    local f = io.open(path, 'wb')
+    if not f then
+        return false
+    end
+    local ok = f:write(content)
+    f:close()
+    return ok and true or false
+end
+
+-- a file's identity without stat (Windows has none in Lua): its size and a hash of every 997th
+-- byte and the last 4 KB. Saved variables files change all over when they change at all.
+local function fingerprint(content)
+    if not content then
+        return 'missing'
+    end
+    local h, n = 0, #content
+    for i = 1, n, 997 do
+        h = (h * 31 + content:byte(i)) % 4294967296
+    end
+    for i = math.max(1, n - 4095), n do
+        h = (h * 31 + content:byte(i)) % 4294967296
+    end
+    return n .. ':' .. h
+end
+
+-- replaces path with tmp. macOS: one rename. Windows cannot rename over a file: the old one is moved
+-- aside first and put back if the swap fails.
+local function replace(tmp, path)
+    if not WINDOWS then
+        return os.rename(tmp, path)
+    end
+    local old = path .. '.auxsync-old'
+    os.remove(old)
+    if not os.rename(path, old) then
+        return false
+    end
+    if not os.rename(tmp, path) then
+        os.rename(old, path)
+        return false
+    end
+    os.remove(old)
+    return true
 end
 
 local function log(text)
@@ -38,6 +130,7 @@ local function log(text)
         local size = f:seek('end')
         f:close()
         if size > LOG_LIMIT then
+            os.remove(path .. '.old')
             os.rename(path, path .. '.old')
         end
     end
@@ -48,31 +141,14 @@ local function log(text)
     end
 end
 
-local function command_lines(cmd)
-    local lines = {}
-    local p = io.popen(cmd)
-    for line in p:lines() do
-        lines[#lines + 1] = line
-    end
-    p:close()
-    return lines
-end
-
--- modification time and size, or nil when the file is missing
-local function stat(path)
-    local out = command_lines('stat -f "%m %z" ' .. shell_quote(path) .. ' 2>/dev/null')[1]
-    if out then
-        local mtime, size = out:match('^(%d+) (%d+)$')
-        return tonumber(mtime), tonumber(size)
-    end
-end
-
 -- the accounts' saved files, sorted (the merge order is then the same every run)
 local function account_files()
     local files = {}
-    for _, dir in ipairs(command_lines('ls -1 ' .. shell_quote(WTF_ACCOUNTS) .. ' 2>/dev/null')) do
+    for _, dir in ipairs(list(WTF_ACCOUNTS, true)) do
         local path = WTF_ACCOUNTS .. '/' .. dir .. '/SavedVariables/' .. FILE_NAME
-        if stat(path) then
+        local f = io.open(path, 'rb')
+        if f then
+            f:close()
             files[#files + 1] = {account = dir, path = path}
         end
     end
@@ -80,16 +156,16 @@ local function account_files()
     return files
 end
 
--- state: each file's "mtime size" after the last run, so a run for a change it made itself (or for
+-- state: each file's fingerprint after the last run, so a run for a change it made itself (or for
 -- another file in the folder) ends at once
 local function read_state()
     local state = {}
     local f = io.open(HOME .. '/state', 'r')
     if f then
         for line in f:lines() do
-            local mtime, size, path = line:match('^(%d+) (%d+) (.+)$')
+            local print_, path = line:match('^(%S+) (.+)$')
             if path then
-                state[path] = mtime .. ' ' .. size
+                state[path] = print_
             end
         end
         f:close()
@@ -99,20 +175,19 @@ end
 
 local function write_state(files)
     local f = io.open(HOME .. '/state', 'w')
-    for _, file in ipairs(files) do
-        local mtime, size = stat(file.path)
-        if mtime then
-            f:write(mtime, ' ', size, ' ', file.path, '\n')
+    if f then
+        for _, file in ipairs(files) do
+            f:write(fingerprint(read_file(file.path)), ' ', file.path, '\n')
         end
+        f:close()
     end
-    f:close()
 end
 
 -- saved variables
 
-local function load_saved(path)
+local function load_saved(content, name)
     local env = {}
-    local chunk, err = loadfile(path, 't', env)
+    local chunk, err = load(content, '=' .. name, 't', env)
     if not chunk then
         return nil, err
     end
@@ -316,14 +391,12 @@ end
 
 local function backup(file)
     local dir = HOME .. '/backups'
-    local name = file.account:gsub('[^%w]', '_') .. '-' .. os.date('%Y%m%d-%H%M%S') .. '.lua'
-    local ok = os.execute('cp -p ' .. shell_quote(file.path) .. ' ' .. shell_quote(dir .. '/' .. name))
-    if not ok then
+    local prefix = file.account:gsub('[^%w]', '_') .. '-'
+    if not write_file(dir .. '/' .. prefix .. os.date('%Y%m%d-%H%M%S') .. '.lua', file.content) then
         return false
     end
     local mine = {}
-    local prefix = file.account:gsub('[^%w]', '_') .. '-'
-    for _, entry in ipairs(command_lines('ls -1 ' .. shell_quote(dir))) do
+    for _, entry in ipairs(list(dir, false)) do
         if entry:sub(1, #prefix) == prefix then
             mine[#mine + 1] = entry
         end
@@ -345,8 +418,7 @@ local function main()
     local state = read_state()
     local changed = false
     for _, file in ipairs(files) do
-        local mtime, size = stat(file.path)
-        if state[file.path] ~= mtime .. ' ' .. size then
+        if state[file.path] ~= fingerprint(read_file(file.path)) then
             changed = true
         end
     end
@@ -354,22 +426,31 @@ local function main()
         return
     end
 
-    -- wait until no file was written in the last SETTLE_SECONDS
-    local waited = 0
-    while true do
-        local newest = 0
+    -- wait until no file changed for SETTLE_SECONDS (a game may still be writing)
+    local prints = {}
+    for _, file in ipairs(files) do prints[file.path] = fingerprint(read_file(file.path)) end
+    for _ = 1, SETTLE_TRIES do
+        sleep(SETTLE_SECONDS)
+        local settled = true
         for _, file in ipairs(files) do
-            newest = math.max(newest, stat(file.path) or 0)
+            local now = fingerprint(read_file(file.path))
+            if now ~= prints[file.path] then
+                settled, prints[file.path] = false, now
+            end
         end
-        if os.time() - newest >= SETTLE_SECONDS or waited >= SETTLE_WAIT then
+        if settled then
             break
         end
-        os.execute('sleep 1')
-        waited = waited + 1
     end
 
     for _, file in ipairs(files) do
-        local aux, err = load_saved(file.path)
+        file.content = read_file(file.path)
+        local aux, err
+        if file.content then
+            aux, err = load_saved(file.content, file.account)
+        else
+            err = 'missing'
+        end
         if not aux then
             -- half written, or damaged: leave everything alone, the next save runs this again
             log('skipped: cannot read ' .. file.account .. ' (' .. tostring(err) .. ')')
@@ -377,7 +458,7 @@ local function main()
         end
         file.aux = aux
         file.groups = faction_groups(aux)
-        file.mtime = stat(file.path)
+        file.print = fingerprint(file.content)
     end
 
     -- the union of every file's history, per realm group and faction
@@ -422,22 +503,22 @@ local function main()
         end
         if added + updated > 0 then
             -- a game saved this file while we worked: leave it, the run after that save merges it
-            if stat(file.path) ~= file.mtime then
+            if fingerprint(read_file(file.path)) ~= file.print then
                 log('skipped ' .. file.account .. ': it changed during the merge')
             else
                 local tmp = file.path .. '.auxsync-tmp'
-                local f = assert(io.open(tmp, 'w'))
-                f:write(serialize(file.aux))
-                f:close()
-                local check = load_saved(tmp)
+                local content = serialize(file.aux)
+                local check = write_file(tmp, content) and load_saved(read_file(tmp) or '', file.account)
                 if not check or not same(check, file.aux) then
                     os.remove(tmp)
                     log('ERROR: ' .. file.account .. ' did not read back identical; not written')
                 elseif not backup(file) then
                     os.remove(tmp)
                     log('ERROR: could not back up ' .. file.account .. '; not written')
+                elseif not replace(tmp, file.path) then
+                    os.remove(tmp)
+                    log('ERROR: could not replace ' .. file.account .. '; not written')
                 else
-                    assert(os.rename(tmp, file.path))
                     log(string.format('%s: %d items added, %d items updated', file.account, added, updated))
                 end
             end
