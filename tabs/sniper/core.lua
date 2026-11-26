@@ -775,6 +775,26 @@ function M.set_quality(q)
     scope_changed()
 end
 
+-- 0.9.1: the ignored word an item's name holds, if any
+local function ignored_word(name)
+    if not name then return end
+    local lower = strlower(name)
+    for _, word in ipairs(aux.account_data.sniper_ignored_words) do
+        if strfind(lower, word, 1, true) then
+            return word
+        end
+    end
+end
+
+-- an item list entry's full name, the ending included ("Robe of the Hierophant"); nil until loaded
+local function list_name(item_key)
+    if (item_key.itemSuffix or 0) ~= 0 then
+        local key_info = C_AuctionHouse.GetItemKeyInfo(item_key)
+        return type(key_info) == 'table' and key_info.itemName or nil
+    end
+    return (GetItemInfo(item_key.itemID))
+end
+
 function check_list(results, seen, validator, round_scope_id)
     local percent, min_profit = settings()
     local candidates, candidate_keys = {}, {}
@@ -805,6 +825,10 @@ function check_list(results, seen, validator, round_scope_id)
                 stats.items = stats.items + 1
                 if price_key and price_key ~= key and aux.account_data.sniper_ignored[price_key] then
                     -- ignored by name (another version of an ignored gear name)
+                    known[key] = price
+                    tally(stats.reasons, 'ignored')
+                elseif aux.account_data.sniper_ignored_words[1] and ignored_word(list_name(result.itemKey)) then
+                    -- 0.9.1: its name holds an ignored word
                     known[key] = price
                     tally(stats.reasons, 'ignored')
                 elseif price_key then
@@ -992,12 +1016,63 @@ end
 
 function M.unignore_all()
     aux.wipe(aux.account_data.sniper_ignored)
+    aux.wipe(aux.account_data.sniper_ignored_words)
     aux.wipe(known)
     update_deals()
 end
 
+-- 0.9.1: one ignored item back; its versions are judged again
+function M.unignore(price_key)
+    aux.account_data.sniper_ignored[price_key] = nil
+    aux.wipe(known)
+    update_deals()
+end
+
+-- the ignored items, {key, name} sorted by name
+function M.ignored_items()
+    local items = {}
+    for key, name in pairs(aux.account_data.sniper_ignored) do
+        tinsert(items, {key = key, name = type(name) == 'string' and name or key})
+    end
+    sort(items, function(a, b) return strlower(a.name) < strlower(b.name) end)
+    return items
+end
+
+-- 0.9.1: ignores every item whose name holds the text ("of the hierophant", any case); the deals
+-- already found that it covers go. Returns the word, or nil for one too short or already there.
+function M.ignore_word(text)
+    local word = strlower(strtrim(text or ''))
+    if strlen(word) < 3 then return end
+    for _, known_word in ipairs(aux.account_data.sniper_ignored_words) do
+        if known_word == word then return end
+    end
+    tinsert(aux.account_data.sniper_ignored_words, word)
+    sort(aux.account_data.sniper_ignored_words)
+    for i = #deals, 1, -1 do
+        if deals[i].name and strfind(strlower(deals[i].name), word, 1, true) then
+            tremove(deals, i)
+        end
+    end
+    update_deals()
+    return word
+end
+
+function M.unignore_word(word)
+    for i = #aux.account_data.sniper_ignored_words, 1, -1 do
+        if aux.account_data.sniper_ignored_words[i] == word then
+            tremove(aux.account_data.sniper_ignored_words, i)
+        end
+    end
+    aux.wipe(known)
+    update_deals()
+end
+
+function M.ignored_words()
+    return aux.account_data.sniper_ignored_words
+end
+
 function M.ignored_count()
-    return aux.size(aux.account_data.sniper_ignored)
+    return aux.size(aux.account_data.sniper_ignored) + #aux.account_data.sniper_ignored_words
 end
 
 -- The deals shown: those that pass the current settings, gone ones too (a 1c find from a looser

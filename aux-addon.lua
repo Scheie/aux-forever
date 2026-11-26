@@ -326,6 +326,8 @@ function event.AUX_LOADED()
         sniper_scope = {kind = 'all'},
         sniper_quality = 1,
         sniper_ignored = {},
+        -- 0.9.1: words that ignore every item whose name holds them ("of the hierophant"), lower case
+        sniper_ignored_words = {},
         replicate_time = 0,
         window = {},
         background_opacity = 1,

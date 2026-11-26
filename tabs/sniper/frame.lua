@@ -613,13 +613,189 @@ do
     btn:SetScript('OnClick', function() clear_deals() end)
     clear_button = btn
 end
+-- 0.9.1: the ignored items and words in a panel under the Ignored button: a click on one takes it
+-- back, and a word ("of the hierophant") ignores every item whose name holds it
 do
+    local MENU_W = 300
+    local ROW_H = 20
+    local ITEM_ROWS = 12
+    local offset = 0 -- the first ignored item shown (mouse wheel)
+
     local btn = gui.button(frame, gui.font_size.small)
     btn:SetPoint('RIGHT', clear_button, 'LEFT', -5, 0)
     btn:SetHeight(22)
     btn:SetWidth(120)
-    btn:SetScript('OnClick', function() unignore_all() end)
     unignore_button = btn
+
+    local menu = CreateFrame('Frame', nil, frame, 'BackdropTemplate')
+    gui.set_panel_style(menu)
+    menu:SetFrameStrata('DIALOG')
+    menu:SetClampedToScreen(true)
+    menu:EnableMouse(true)
+    menu:EnableMouseWheel(true)
+    menu:SetPoint('TOPRIGHT', btn, 'BOTTOMRIGHT', 0, -3)
+    menu:Hide()
+    M.ignored_menu = menu
+
+    local function header(text)
+        local label = gui.label(menu, gui.font_size.small)
+        gui.text_color(label, aux.color.accent.background)
+        label:SetText(text)
+        return label
+    end
+
+    local rows = {}
+    local function row(i)
+        local r = rows[i]
+        if not r then
+            r = gui.button(menu, gui.font_size.small)
+            local fs = r:GetFontString()
+            if fs then
+                fs:SetJustifyH('LEFT')
+                fs:ClearAllPoints()
+                fs:SetPoint('LEFT', 8, 0)
+                fs:SetPoint('RIGHT', -64, 0)
+                fs:SetWordWrap(false)
+            end
+            local hint = gui.label(r, gui.font_size.small)
+            hint:SetPoint('RIGHT', -8, 0)
+            hint:SetText('unignore')
+            gui.text_color(hint, aux.color.label.disabled)
+            r:SetScript('OnEnter', function(self)
+                GameTooltip:SetOwner(self, 'ANCHOR_RIGHT')
+                GameTooltip:AddLine(self.tip, 1, 1, 1, true)
+                GameTooltip:AddLine('Click to unignore.', nil, nil, nil, true)
+                GameTooltip:Show()
+            end)
+            r:SetScript('OnLeave', function() GameTooltip:Hide() end)
+            rows[i] = r
+        end
+        gui.set_size(r, MENU_W - 16, ROW_H)
+        return r
+    end
+
+    local words_title = header('IGNORE NAMES CONTAINING')
+    local word_input = gui.editbox(menu)
+    gui.set_size(word_input, MENU_W - 16 - 54, 22)
+    local add_button = gui.button(menu, gui.font_size.small)
+    gui.set_size(add_button, 50, 22)
+    add_button:SetText('Add')
+    local items_title = header('')
+    local empty_note = gui.label(menu, gui.font_size.small)
+    gui.text_color(empty_note, aux.color.label.disabled)
+    empty_note:SetText('Nothing ignored. Select a deal and press Ignore item.')
+    local all_button = gui.button(menu, gui.font_size.small)
+    gui.set_size(all_button, MENU_W - 16, 22)
+    all_button:SetText('Unignore all')
+
+    local function populate()
+        for _, r in ipairs(rows) do r:Hide() end
+        local y = -8
+        local n = 0
+        words_title:ClearAllPoints()
+        words_title:SetPoint('TOPLEFT', 10, y)
+        y = y - 16
+        word_input:ClearAllPoints()
+        word_input:SetPoint('TOPLEFT', 8, y)
+        add_button:ClearAllPoints()
+        add_button:SetPoint('LEFT', word_input, 'RIGHT', 4, 0)
+        y = y - 26
+        for _, word in ipairs(ignored_words()) do
+            n = n + 1
+            local r = row(n)
+            r:ClearAllPoints()
+            r:SetPoint('TOPLEFT', 8, y)
+            r:SetText('"' .. word .. '"')
+            r.tip = 'Every item whose name contains "' .. word .. '" is ignored.'
+            r:SetScript('OnClick', function() unignore_word(word); populate() end)
+            r:Show()
+            y = y - (ROW_H + 2)
+        end
+
+        local items = ignored_items()
+        offset = max(0, min(offset, #items - ITEM_ROWS))
+        y = y - 6
+        items_title:ClearAllPoints()
+        items_title:SetPoint('TOPLEFT', 10, y)
+        if #items > ITEM_ROWS then
+            items_title:SetText(format('IGNORED ITEMS  %d-%d of %d (scroll)', offset + 1, offset + ITEM_ROWS, #items))
+        else
+            items_title:SetText('IGNORED ITEMS')
+        end
+        y = y - 16
+        if #items == 0 then
+            empty_note:ClearAllPoints()
+            empty_note:SetPoint('TOPLEFT', 10, y - 2)
+            empty_note:Show()
+            y = y - 20
+        else
+            empty_note:Hide()
+        end
+        for i = offset + 1, min(#items, offset + ITEM_ROWS) do
+            local item = items[i]
+            n = n + 1
+            local r = row(n)
+            r:ClearAllPoints()
+            r:SetPoint('TOPLEFT', 8, y)
+            r:SetText(item.name)
+            r.tip = item.name
+            r:SetScript('OnClick', function() unignore(item.key); populate() end)
+            r:Show()
+            y = y - (ROW_H + 2)
+        end
+
+        y = y - 6
+        all_button:ClearAllPoints()
+        all_button:SetPoint('TOPLEFT', 8, y)
+        if ignored_count() > 0 then all_button:Enable() else all_button:Disable() end
+        y = y - 22
+        gui.set_size(menu, MENU_W, -y + 8)
+    end
+    M.populate_ignored_menu = populate
+
+    local function add_word()
+        if ignore_word(word_input:GetText()) then
+            word_input:SetText('')
+            populate()
+        end
+        word_input:ClearFocus()
+    end
+    word_input.enter = add_word
+    add_button:SetScript('OnClick', add_word)
+    add_button:SetScript('OnEnter', function(self)
+        GameTooltip:SetOwner(self, 'ANCHOR_RIGHT')
+        GameTooltip:AddLine('Ignore names containing')
+        GameTooltip:AddLine('Every item whose name contains the text (at least 3 letters, any case) is never shown as a deal, for example "of the hierophant".', 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    add_button:SetScript('OnLeave', function() GameTooltip:Hide() end)
+    all_button:SetScript('OnClick', function() unignore_all(); populate() end)
+
+    menu:SetScript('OnMouseWheel', function(_, delta)
+        offset = offset - delta * 3
+        populate()
+    end)
+    menu:SetScript('OnEvent', function(self)
+        if self:IsShown() and not self:IsMouseOver() and not btn:IsMouseOver() then
+            self:Hide()
+        end
+    end)
+    menu:HookScript('OnShow', function(self) pcall(self.RegisterEvent, self, 'GLOBAL_MOUSE_DOWN') end)
+    menu:HookScript('OnHide', function(self)
+        pcall(self.UnregisterEvent, self, 'GLOBAL_MOUSE_DOWN')
+        word_input:ClearFocus()
+    end)
+    frame:HookScript('OnHide', function() menu:Hide() end)
+
+    btn:SetScript('OnClick', function()
+        if menu:IsShown() then
+            menu:Hide()
+        else
+            offset = 0
+            populate()
+            menu:Show()
+        end
+    end)
 end
 do
     local btn = gui.button(frame, gui.font_size.small)
@@ -730,8 +906,8 @@ do
         local ignored = ignored_count()
         if ignored ~= last_ignored then
             last_ignored = ignored
-            unignore_button:SetText(ignored > 0 and 'Unignore all (' .. ignored .. ')' or 'Unignore all')
-            if ignored > 0 then unignore_button:Enable() else unignore_button:Disable() end
+            unignore_button:SetText(ignored > 0 and 'Ignored (' .. ignored .. ') v' or 'Ignored v')
+            if ignored_menu:IsShown() then populate_ignored_menu() end
         end
     end
 end
