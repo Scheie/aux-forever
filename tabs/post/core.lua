@@ -863,7 +863,8 @@ function quantity_update(maximize_count)
         end
         stack_count_input.max_value = max_stack_count
         if maximize_count then
-            stack_count_input:SetNumber(max_stack_count)
+            -- 0.9.1: gear (anything not a trade good) starts at one listing, however many are in the bags
+            stack_count_input:SetNumber(selected_item.commodity and max_stack_count or 1)
         end
     end
     refresh = true
