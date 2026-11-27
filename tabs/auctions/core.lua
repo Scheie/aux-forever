@@ -141,6 +141,9 @@ function M.check_prices()
                 for _, result in ipairs(results or empty) do
                     by_key[key_text(result.itemKey)] = result
                 end
+                -- why each item was or was not settled by this request (/aux debug prints it)
+                local why = {}
+                local function note(reason) why[reason] = (why[reason] or 0) + 1 end
                 for _, item_key in ipairs(keys) do
                     local key = item_key.itemID .. ':0'
                     local result = by_key[key_text(item_key)]
@@ -148,15 +151,33 @@ function M.check_prices()
                     local unit = result and result.minPrice or 0
                     if key_info and key_info.isCommodity and unit > 0 and lowest[key] and unit < lowest[key] then
                         found[key] = {lowest = unit, at_price = {}}
+                        note('undercut, settled')
                     else
                         tinsert(remaining, item_key)
+                        if not results then note('no answer')
+                        elseif not result then note('not in the answer')
+                        elseif not key_info then note('item not loaded')
+                        elseif not key_info.isCommodity then note('not a trade good')
+                        elseif unit <= 0 then note('no lowest price')
+                        else note('yours is lowest or tied') end
                     end
+                end
+                if aux.account_data.debug_timing then
+                    local parts = {}
+                    for reason, n in pairs(why) do tinsert(parts, n .. ' ' .. reason) end
+                    sort(parts)
+                    aux.print(format('Price check: one request for %d items (%s); %d answered%s. %s',
+                        #keys, C_AuctionHouse.SearchForItemKeys and 'SearchForItemKeys' or '?',
+                        results and #results or 0, results and '' or ' (no answer)', table.concat(parts, ', ')))
                 end
                 if checking and checking.total then
                     checking.total = checking.done + #remaining
                 end
             end})
         else
+            if aux.account_data.debug_timing then
+                aux.print('Price check: this game has no C_AuctionHouse.SearchForItemKeys, so every item is read one by one.')
+            end
             tinsert(queries, 1, {item_keys = keys})
         end
     end
@@ -198,6 +219,9 @@ function M.check_prices()
             entry.at_price[price] = (entry.at_price[price] or 0) + max(1, (record.seller_count or 1) - (mine and 1 or 0))
         end,
         on_complete = function(result)
+            if aux.account_data.debug_timing then
+                aux.print(format('Price check done: %d reads one by one (each version of gear included), %d name searches for gear with an ending.', checking and checking.done or 0, by_name))
+            end
             -- 0.8.2.1 (outside review, R-02): when part of the answer is missing (the item list did
             -- not fully arrive, or an item could not be read), an item nothing was found for is not
             -- "Lowest" or "Only one listed": it keeps what the last check said, or "Not checked",
