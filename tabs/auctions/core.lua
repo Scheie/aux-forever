@@ -96,12 +96,15 @@ end
 -- the exact version alone said "Only one listed" with others of the name for sale. Such gear is read
 -- with a name search of the item (every version), anything else by its item key as before.
 function M.check_prices()
-    local keys, item_ids, queries, wanted, seen, highest = {}, {}, {}, {}, {}, {}
+    local keys, item_ids, queries, wanted, seen, highest, lowest = {}, {}, {}, {}, {}, {}, {}
     for _, record in ipairs(listing.records or empty) do
         if record.sale_status ~= 1 and record.item_search_key then
             local key = check_key(record)
             local price = ceil(record.unit_buyout_price or 0)
             highest[key] = max(highest[key] or 0, price)
+            if price > 0 and (not lowest[key] or price < lowest[key]) then
+                lowest[key] = price
+            end
             if not wanted[key] then
                 wanted[key] = true
                 if key ~= record.item_id .. ':0' then
@@ -120,16 +123,45 @@ function M.check_prices()
             end
         end
     end
-    if #keys > 0 then
-        tinsert(queries, 1, {item_keys = keys})
-    end
-    if #queries == 0 then
+    if #queries == 0 and #keys == 0 then
         return
     end
     local found = {}
+    local by_name = #queries -- name searches (gear with an ending)
+    -- 0.9.1: trade goods are first asked for all together, in one request (SearchForItemKeys): its
+    -- lowest price per item is enough when it is below every one of yours, since then another seller
+    -- undercut you by exactly that much (trade goods have no bids). Only the rest (lowest or tied,
+    -- which needs who sells at your price, and items, whose lowest can be a bid) are read one by one.
+    if #keys > 0 then
+        if C_AuctionHouse.SearchForItemKeys then
+            local remaining = {}
+            tinsert(queries, 1, {item_keys = remaining})
+            tinsert(queries, 1, {search_keys = keys, on_results = function(results)
+                local by_key = {}
+                for _, result in ipairs(results or empty) do
+                    by_key[key_text(result.itemKey)] = result
+                end
+                for _, item_key in ipairs(keys) do
+                    local key = item_key.itemID .. ':0'
+                    local result = by_key[key_text(item_key)]
+                    local key_info = C_AuctionHouse.GetItemKeyInfo(item_key)
+                    local unit = result and result.minPrice or 0
+                    if key_info and key_info.isCommodity and unit > 0 and lowest[key] and unit < lowest[key] then
+                        found[key] = {lowest = unit, at_price = {}}
+                    else
+                        tinsert(remaining, item_key)
+                    end
+                end
+                if checking and checking.total then
+                    checking.total = checking.done + #remaining
+                end
+            end})
+        else
+            tinsert(queries, 1, {item_keys = keys})
+        end
+    end
     -- 0.8 (review H-002, finding 5): a name search reads every version of the item, so how many items
     -- are left is not known in advance; then only the count read so far is shown
-    local by_name = #queries - (#keys > 0 and 1 or 0)
     checking = {done = 0, total = by_name == 0 and #keys or nil}
     scan.start{
         type = 'list',

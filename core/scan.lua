@@ -499,10 +499,24 @@ function M.last_read_is(item_key)
 end
 
 function browse_results(blizzard_query)
-    local events = {'AUCTION_HOUSE_BROWSE_RESULTS_UPDATED', 'AUCTION_HOUSE_BROWSE_RESULTS_ADDED', 'AUCTION_HOUSE_BROWSE_FAILURE'}
     local query = browse_query(blizzard_query)
+    return list_results(function() C_AuctionHouse.SendBrowseQuery(query) end)
+end
+
+-- 0.9.1: the item list of the given item keys only, all of them in one request
+-- (C_AuctionHouse.SearchForItemKeys), as browse_results returns it; nil when the game has no such
+-- function or the auction house did not answer
+function M.key_results(item_keys)
+    if not C_AuctionHouse.SearchForItemKeys or #item_keys == 0 then
+        return
+    end
+    return list_results(function() C_AuctionHouse.SearchForItemKeys(item_keys, SORTS) end)
+end
+
+function list_results(send)
+    local events = {'AUCTION_HOUSE_BROWSE_RESULTS_UPDATED', 'AUCTION_HOUSE_BROWSE_RESULTS_ADDED', 'AUCTION_HOUSE_BROWSE_FAILURE'}
     last_read = nil
-    local answer = request(function() C_AuctionHouse.SendBrowseQuery(query) end, events)
+    local answer = request(send, events)
     if not answer or answer == 'AUCTION_HOUSE_BROWSE_FAILURE' then
         return
     end
@@ -993,6 +1007,87 @@ function replicate()
     check_aborted(scan_state)
 end
 
+-- 0.9.1: /aux debug keys. Tries C_AuctionHouse.SearchForItemKeys with the items you are selling:
+-- whether the game has it, how long one request takes, and what it says next to a full read of a
+-- few of them (whether its lowest price counts your own auctions, and whether it can be a bid)
+function M.measure_key_search()
+    if state then
+        aux.print('A search is running; try again when it is done.')
+        return
+    end
+    if not C_AuctionHouse.SearchForItemKeys then
+        aux.print('Key search: this game has no C_AuctionHouse.SearchForItemKeys.')
+        return
+    end
+    local keys, seen, mine = {}, {}, {}
+    for _, record in owner_auctions() do
+        if record.sale_status ~= 1 and record.item_search_key then
+            local k = item_key_string(record.item_search_key)
+            if not seen[k] then
+                seen[k] = true
+                tinsert(keys, record.item_search_key)
+            end
+            local price = ceil(record.unit_buyout_price or 0)
+            if price > 0 and (not mine[k] or price < mine[k]) then
+                mine[k] = price
+            end
+        end
+    end
+    if #keys == 0 then
+        aux.print('Key search: you have no auctions to try it with. Post something, open the Auctions tab, and try again.')
+        return
+    end
+    local money = require 'aux.util.money'
+    local function coins(amount)
+        return amount and money.to_string(amount, true) or '-'
+    end
+    aux.coro_thread(function()
+        state = {id = aux.coro_id(), params = {}, listener_ids = {}}
+        local requests_before = requests_sent
+        local t0 = GetTime()
+        local results, whole = key_results(keys)
+        local seconds, requests = GetTime() - t0, requests_sent - requests_before
+        if not results then
+            state = nil
+            aux.print(format('Key search: no answer for %d items (%s, %d %s).', #keys, format_seconds(seconds), requests, requests == 1 and 'request' or 'requests'))
+            return
+        end
+        aux.print(format('Key search: %d items asked, %d answered%s in %s (%d %s).', #keys, #results,
+            whole and '' or ' (list incomplete)', format_seconds(seconds), requests, requests == 1 and 'request' or 'requests'))
+        local by_key = {}
+        for _, result in ipairs(results) do
+            by_key[item_key_string(result.itemKey)] = result
+        end
+        -- up to 4 compared with a full read: cheapest of all, cheapest of other sellers
+        for i = 1, min(4, #keys) do
+            local key = keys[i]
+            local k = item_key_string(key)
+            local result = by_key[k]
+            local key_info = C_AuctionHouse.GetItemKeyInfo(key)
+            local name = key_info and key_info.itemName or ('item ' .. key.itemID)
+            local records = search(key) or {}
+            local any, other, bid_only
+            for _, record in ipairs(records) do
+                local price = ceil(record.unit_buyout_price or 0)
+                if price > 0 then
+                    any = min(any or price, price)
+                    if not record.own then
+                        other = min(other or price, price)
+                    end
+                elseif (record.unit_bid_price or 0) > 0 then
+                    bid_only = min(bid_only or record.unit_bid_price, record.unit_bid_price)
+                end
+            end
+            aux.print(format('  %s (%s): key search lowest %s, %s for sale%s; full read lowest %s, other sellers %s%s; yours %s',
+                name, key_info and key_info.isCommodity and 'trade good' or 'item',
+                coins(result and result.minPrice), result and result.totalQuantity or '-',
+                result and result.containsOwnerItem and ', has yours' or '',
+                coins(any), coins(other), bid_only and (', bid only ' .. coins(ceil(bid_only))) or '', coins(mine[k])))
+        end
+        state = nil
+    end)
+end
+
 -- auxForever: /aux debug list. Times the item list of the whole auction house without opening any
 -- item, which is what fast mode and the sniper would do: how long it takes and how big it is.
 function M.measure_item_list()
@@ -1025,6 +1120,10 @@ function scan()
         check_aborted(scan_state)
         if state.params.get_all then
             replicate()
+        elseif get_query().search_keys then
+            -- 0.9.1: the item list of these item keys, handed to the query's own on_results (nil when
+            -- it could not be had); a later query of the same scan can still take what it adds
+            get_query().on_results(key_results(get_query().search_keys))
         elseif get_query().item_keys then
             scan_item_keys(get_query().item_keys)
         elseif state.params.fast or state.params.on_item_list then
