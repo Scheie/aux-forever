@@ -562,6 +562,10 @@ function search(item_key)
     end
     last_read = item_key
     wait_item(item_key.itemID)
+    -- 0.9.1: params.enough(item_key, unit price of the last row read) stops reading more pages once
+    -- the rest cannot matter (the Auctions tab's undercut check needs nothing above your price). The
+    -- rows come cheapest first; a view cut short is not complete, so it records no market price.
+    local enough = state and state.params and state.params.enough
 
     local records, complete, rows = {}, true
     if key_info.isCommodity then
@@ -576,6 +580,13 @@ function search(item_key)
             return
         end
         while not C_AuctionHouse.HasFullCommoditySearchResults(item_id) do
+            if enough then
+                local last = C_AuctionHouse.GetCommoditySearchResultInfo(item_id, C_AuctionHouse.GetNumCommoditySearchResults(item_id))
+                if last and enough(item_key, last.unitPrice or 0) then
+                    complete = false
+                    break
+                end
+            end
             if not request(function() C_AuctionHouse.RequestMoreCommoditySearchResults(item_id) end, events, match) then
                 complete = false
                 break
@@ -598,6 +609,13 @@ function search(item_key)
             return
         end
         while not C_AuctionHouse.HasFullItemSearchResults(item_key) do
+            if enough then
+                local last = C_AuctionHouse.GetItemSearchResultInfo(item_key, C_AuctionHouse.GetNumItemSearchResults(item_key))
+                if last and (last.buyoutAmount or 0) > 0 and enough(item_key, last.buyoutAmount / max(1, last.quantity or 1)) then
+                    complete = false
+                    break
+                end
+            end
             if not request(function() C_AuctionHouse.RequestMoreItemSearchResults(item_key) end, events, match) then
                 complete = false
                 break

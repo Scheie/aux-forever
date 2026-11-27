@@ -3,6 +3,7 @@ select(2, ...) 'aux.tabs.auctions'
 local aux = require 'aux'
 local scan = require 'aux.core.scan'
 local scan_util = require 'aux.util.scan'
+local info = require 'aux.util.info'
 
 local tab = aux.tab 'Auctions'
 
@@ -95,10 +96,12 @@ end
 -- the exact version alone said "Only one listed" with others of the name for sale. Such gear is read
 -- with a name search of the item (every version), anything else by its item key as before.
 function M.check_prices()
-    local keys, item_ids, queries, wanted, seen = {}, {}, {}, {}, {}
+    local keys, item_ids, queries, wanted, seen, highest = {}, {}, {}, {}, {}, {}
     for _, record in ipairs(listing.records or empty) do
         if record.sale_status ~= 1 and record.item_search_key then
             local key = check_key(record)
+            local price = ceil(record.unit_buyout_price or 0)
+            highest[key] = max(highest[key] or 0, price)
             if not wanted[key] then
                 wanted[key] = true
                 if key ~= record.item_id .. ':0' then
@@ -132,6 +135,19 @@ function M.check_prices()
         type = 'list',
         quiet = true,
         queries = queries,
+        -- 0.9.1: a name search reads only the versions of your own endings ("Ritual Belt of the
+        -- Owl" is not read for a Ritual Belt of the Bear); one whose name has not loaded is read
+        skip_key = function(result)
+            local key = info.item_key_price_key(result.itemKey)
+            return key ~= nil and not wanted[key]
+        end,
+        -- 0.9.1: an item's pages stop once past your highest price for it: only cheaper listings
+        -- (undercut) and listings at your price (tied) are counted, and the rows come cheapest first
+        enough = function(item_key, unit_price)
+            local key = info.item_key_price_key(item_key)
+            local cap = key and highest[key]
+            return cap ~= nil and cap > 0 and ceil(unit_price) > cap
+        end,
         on_page_loaded = function()
             if checking then checking.done = checking.done + 1 end
         end,
