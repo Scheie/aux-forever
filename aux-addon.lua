@@ -328,6 +328,9 @@ function event.AUX_LOADED()
         sniper_ignored = {},
         -- 0.9.1: words that ignore every item whose name holds them ("of the hierophant"), lower case
         sniper_ignored_words = {},
+        -- 0.9.1: deals hidden for a while (Snooze): price key -> {until = time(), name = ...}
+        sniper_snoozed = {},
+        sniper_snooze_minutes = 30,
         replicate_time = 0,
         window = {},
         background_opacity = 1,

@@ -756,18 +756,20 @@ do
             end
             local hint = gui.label(r, gui.font_size.small)
             hint:SetPoint('RIGHT', -8, 0)
-            hint:SetText('unignore')
             gui.text_color(hint, aux.color.label.disabled)
+            r.hint = hint
             r:SetScript('OnEnter', function(self)
                 GameTooltip:SetOwner(self, 'ANCHOR_RIGHT')
                 GameTooltip:AddLine(self.tip, 1, 1, 1, true)
-                GameTooltip:AddLine('Click to unignore.', nil, nil, nil, true)
+                GameTooltip:AddLine(self.click_tip, nil, nil, nil, true)
                 GameTooltip:Show()
             end)
             r:SetScript('OnLeave', function() GameTooltip:Hide() end)
             rows[i] = r
         end
         gui.set_size(r, MENU_W - 16, ROW_H)
+        r.hint:SetText('unignore')
+        r.click_tip = 'Click to unignore.'
         return r
     end
 
@@ -778,6 +780,7 @@ do
     gui.set_size(add_button, 50, 22)
     add_button:SetText('Add')
     local items_title = header('')
+    local snoozed_title = header('SNOOZED')
     local empty_note = gui.label(menu, gui.font_size.small)
     gui.text_color(empty_note, aux.color.label.disabled)
     empty_note:SetText('Nothing ignored. Select a deal and press Ignore item.')
@@ -847,6 +850,30 @@ do
             r:SetScript('OnClick', function() unignore(item.key); populate() end)
             r:Show()
             y = y - (ROW_H + 2)
+        end
+
+        local snoozes = snoozed_items()
+        if #snoozes > 0 then
+            y = y - 6
+            snoozed_title:ClearAllPoints()
+            snoozed_title:SetPoint('TOPLEFT', 10, y)
+            snoozed_title:Show()
+            y = y - 16
+            for _, item in ipairs(snoozes) do
+                n = n + 1
+                local r = row(n)
+                r:ClearAllPoints()
+                r:SetPoint('TOPLEFT', 8, y)
+                r:SetText(item.name)
+                r.hint:SetText(ceil(item.left / 60) .. 'm left')
+                r.tip = item.name
+                r.click_tip = 'Click to show it again now.'
+                r:SetScript('OnClick', function() unsnooze(item.key); populate() end)
+                r:Show()
+                y = y - (ROW_H + 2)
+            end
+        else
+            snoozed_title:Hide()
         end
 
         y = y - 6
@@ -922,6 +949,49 @@ do
     end)
     btn:SetScript('OnLeave', function() GameTooltip:Hide() end)
     ignore_button = btn
+end
+-- 0.9.1: Snooze hides the selected deal for the minutes in the box next to it
+do
+    local label = gui.label(frame, gui.font_size.small)
+    label:SetPoint('RIGHT', ignore_button, 'LEFT', -8, 0)
+    label:SetText('min')
+    gui.text_color(label, aux.color.label.enabled)
+    local editbox = gui.editbox(frame)
+    editbox:SetPoint('RIGHT', label, 'LEFT', -3, 0)
+    editbox:SetWidth(36)
+    editbox:SetHeight(22)
+    editbox:SetAlignment('CENTER')
+    editbox:SetNumeric(true)
+    editbox.change = function(self, user)
+        local minutes = tonumber(self:GetText())
+        if user and minutes and minutes >= 1 then
+            set_snooze_minutes(minutes)
+        end
+    end
+    editbox.enter = function(self) self:ClearFocus() end
+    editbox.focus_loss = function(self)
+        self:SetText(tostring(aux.account_data.sniper_snooze_minutes))
+    end
+    snooze_input = editbox
+    local btn = gui.button(frame, gui.font_size.small)
+    btn:SetPoint('RIGHT', editbox, 'LEFT', -5, 0)
+    btn:SetHeight(22)
+    btn:SetWidth(70)
+    btn:SetText('Snooze')
+    btn:SetScript('OnClick', function()
+        local selection = listing:GetSelection()
+        if selection then
+            snooze(selection.record)
+        end
+    end)
+    btn:SetScript('OnEnter', function(self)
+        GameTooltip:SetOwner(self, 'ANCHOR_BOTTOM')
+        GameTooltip:AddLine('Snooze')
+        GameTooltip:AddLine('The selected item is not shown as a deal for the minutes in the box. Snoozed items are listed under Ignored, where a click brings one back early.', 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    btn:SetScript('OnLeave', function() GameTooltip:Hide() end)
+    snooze_button = btn
 end
 
 -- next to the deal count: the price history notice (history_notice) and a Full scan button
@@ -1020,6 +1090,7 @@ end
 function aux.event.AUX_LOADED()
     percent_input:SetText(tostring(aux.account_data.sniper_percent))
     profit_input:SetText(money.to_string(aux.account_data.sniper_profit, nil, true, nil, true))
+    snooze_input:SetText(tostring(aux.account_data.sniper_snooze_minutes))
     gui.set_selected(sound_button, aux.account_data.sniper_sound)
     update_scope_controls()
 end

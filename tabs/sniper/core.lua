@@ -795,6 +795,15 @@ local function list_name(item_key)
     return (GetItemInfo(item_key.itemID))
 end
 
+-- 0.9.1: whether a deal is snoozed (Snooze); an ended snooze is forgotten here
+local function snoozed(key)
+    local entry = key and aux.account_data.sniper_snoozed[key]
+    if not entry then return false end
+    if time() < (entry['until'] or 0) then return true end
+    aux.account_data.sniper_snoozed[key] = nil
+    return false
+end
+
 function check_list(results, seen, validator, round_scope_id)
     local percent, min_profit = settings()
     local candidates, candidate_keys = {}, {}
@@ -831,6 +840,9 @@ function check_list(results, seen, validator, round_scope_id)
                     -- 0.9.1: its name holds an ignored word
                     known[key] = price
                     tally(stats.reasons, 'ignored')
+                elseif snoozed(price_key) or snoozed(key) then
+                    -- 0.9.1: snoozed; not marked judged, so it is looked at again once the snooze ends
+                    tally(stats.reasons, 'snoozed')
                 elseif price_key then
                     usual, vendor, days = item_facts(price_key, result.itemKey.itemID)
                 else
@@ -1069,6 +1081,41 @@ end
 
 function M.ignored_words()
     return aux.account_data.sniper_ignored_words
+end
+
+-- 0.9.1: hides a deal, and its item's other versions, for sniper_snooze_minutes
+function M.snooze(record)
+    if not record then return end
+    local price_key = record.price_key or record.deal_key
+    local minutes = max(1, aux.account_data.sniper_snooze_minutes or 30)
+    aux.account_data.sniper_snoozed[price_key] = {['until'] = time() + minutes * 60, name = record.name}
+    for i = #deals, 1, -1 do
+        if deals[i].deal_key == record.deal_key or (deals[i].price_key or deals[i].deal_key) == price_key then
+            tremove(deals, i)
+        end
+    end
+    update_deals()
+end
+
+function M.unsnooze(key)
+    aux.account_data.sniper_snoozed[key] = nil
+    update_deals()
+end
+
+-- the snoozed deals still waiting, {key, name, left (seconds)} soonest back first
+function M.snoozed_items()
+    local items = {}
+    for key, entry in pairs(aux.account_data.sniper_snoozed) do
+        if snoozed(key) then
+            tinsert(items, {key = key, name = entry.name or key, left = entry['until'] - time()})
+        end
+    end
+    sort(items, function(a, b) return a.left < b.left end)
+    return items
+end
+
+function M.set_snooze_minutes(minutes)
+    aux.account_data.sniper_snooze_minutes = max(1, min(10080, floor(tonumber(minutes) or 30)))
 end
 
 -- 0.9.1: the ignore list as text to copy, one entry a line ("word of the hierophant", "item
