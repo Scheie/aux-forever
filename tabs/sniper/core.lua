@@ -1084,14 +1084,28 @@ function M.ignored_words()
 end
 
 -- 0.9.1: hides a deal, and its item's other versions, for sniper_snooze_minutes
-function M.snooze(record)
-    if not record then return end
+local function add_snooze(record)
     local price_key = record.price_key or record.deal_key
     local minutes = max(1, aux.account_data.sniper_snooze_minutes or 30)
     aux.account_data.sniper_snoozed[price_key] = {['until'] = time() + minutes * 60, name = record.name}
     for i = #deals, 1, -1 do
         if deals[i].deal_key == record.deal_key or (deals[i].price_key or deals[i].deal_key) == price_key then
             tremove(deals, i)
+        end
+    end
+end
+
+function M.snooze(record)
+    if not record then return end
+    add_snooze(record)
+    update_deals()
+end
+
+-- 0.9.1: every deal still to buy in the list, snoozed at once (gone ones are only cleared away)
+function M.snooze_all()
+    for _, deal in ipairs(shown_deals()) do
+        if not deal.deal_gone then
+            add_snooze(deal)
         end
     end
     update_deals()

@@ -993,6 +993,22 @@ do
     btn:SetScript('OnLeave', function() GameTooltip:Hide() end)
     snooze_button = btn
 end
+do
+    local btn = gui.button(frame, gui.font_size.small)
+    btn:SetPoint('RIGHT', snooze_button, 'LEFT', -5, 0)
+    btn:SetHeight(22)
+    btn:SetWidth(80)
+    btn:SetText('Snooze all')
+    btn:SetScript('OnClick', function() snooze_all() end)
+    btn:SetScript('OnEnter', function(self)
+        GameTooltip:SetOwner(self, 'ANCHOR_BOTTOM')
+        GameTooltip:AddLine('Snooze all')
+        GameTooltip:AddLine('Every deal still to buy in the list is not shown for the minutes in the box. They are listed under Ignored, where a click brings one back early.', 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    btn:SetScript('OnLeave', function() GameTooltip:Hide() end)
+    snooze_all_button = btn
+end
 
 -- next to the deal count: the price history notice (history_notice) and a Full scan button
 do
