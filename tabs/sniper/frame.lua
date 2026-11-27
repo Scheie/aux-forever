@@ -613,6 +613,103 @@ do
     btn:SetScript('OnClick', function() clear_deals() end)
     clear_button = btn
 end
+-- 0.9.1: the ignore list as text, to copy out (Ctrl+C) or paste in from another account or computer
+do
+    local W, H = 460, 340
+    local dialog = CreateFrame('Frame', nil, frame, 'BackdropTemplate')
+    gui.set_panel_style(dialog)
+    dialog:SetFrameStrata('FULLSCREEN_DIALOG')
+    dialog:SetClampedToScreen(true)
+    dialog:EnableMouse(true)
+    dialog:SetPoint('CENTER', aux.frame, 'CENTER', 0, 0)
+    gui.set_size(dialog, W, H)
+    dialog:Hide()
+    M.ignore_text_dialog = dialog
+
+    local title = gui.label(dialog, gui.font_size.medium)
+    title:SetPoint('TOPLEFT', 12, -10)
+    title:SetText('Sniper ignore list')
+    gui.text_color(title, aux.color.accent.background)
+    local note = gui.label(dialog, gui.font_size.small)
+    note:SetPoint('TOPLEFT', title, 'BOTTOMLEFT', 0, -4)
+    note:SetPoint('RIGHT', -12, 0)
+    note:SetJustifyH('LEFT')
+    note:SetWordWrap(true)
+    gui.text_color(note, aux.color.label.enabled)
+    note:SetText('Ctrl+C copies the selected text. To import, paste an exported list here (Ctrl+V) and press Import: its entries are added to yours.')
+
+    local box = CreateFrame('Frame', nil, dialog, 'BackdropTemplate')
+    gui.set_frame_style(box, aux.color.input.background, aux.color.input.border)
+    box:SetPoint('TOPLEFT', 10, -54)
+    box:SetPoint('BOTTOMRIGHT', -10, 40)
+
+    local scroll = CreateFrame('ScrollFrame', nil, box)
+    scroll:SetPoint('TOPLEFT', 6, -6)
+    scroll:SetPoint('BOTTOMRIGHT', -6, 6)
+    scroll:EnableMouseWheel(true)
+
+    local edit = CreateFrame('EditBox', nil, scroll)
+    edit:SetMultiLine(true)
+    edit:SetAutoFocus(false)
+    edit:SetFontObject(ChatFontNormal)
+    edit:SetWidth(W - 32)
+    edit:SetScript('OnEscapePressed', function() dialog:Hide() end)
+    -- the view follows the cursor
+    edit:SetScript('OnCursorChanged', function(_, _, y, _, height)
+        local top = scroll:GetVerticalScroll()
+        local view = scroll:GetHeight()
+        if -y < top then
+            scroll:SetVerticalScroll(-y)
+        elseif -y + height > top + view then
+            scroll:SetVerticalScroll(-y + height - view)
+        end
+    end)
+    scroll:SetScrollChild(edit)
+    scroll:SetScript('OnMouseWheel', function(self, delta)
+        local most = max(0, edit:GetHeight() - self:GetHeight())
+        self:SetVerticalScroll(aux.bounded(0, most, self:GetVerticalScroll() - delta * 40))
+    end)
+    box:EnableMouse(true)
+    box:SetScript('OnMouseDown', function() edit:SetFocus() end)
+
+    local function button(text, width)
+        local b = gui.button(dialog, gui.font_size.small)
+        gui.set_size(b, width, 22)
+        b:SetText(text)
+        return b
+    end
+    local close = button('Close', 70)
+    close:SetPoint('BOTTOMRIGHT', -10, 10)
+    close:SetScript('OnClick', function() dialog:Hide() end)
+    local import = button('Import', 70)
+    import:SetPoint('RIGHT', close, 'LEFT', -5, 0)
+    local select_all = button('Select all', 80)
+    select_all:SetPoint('RIGHT', import, 'LEFT', -5, 0)
+    select_all:SetScript('OnClick', function() edit:SetFocus(); edit:HighlightText() end)
+    local result = gui.label(dialog, gui.font_size.small)
+    result:SetPoint('LEFT', 12, 0)
+    result:SetPoint('BOTTOM', 0, 15)
+    gui.text_color(result, aux.color.label.enabled)
+
+    import:SetScript('OnClick', function()
+        local added = import_ignored(edit:GetText())
+        result:SetText(added == 1 and '1 entry added.' or added .. ' entries added.')
+        edit:SetText(export_ignored())
+        if ignored_menu:IsShown() then populate_ignored_menu() end
+    end)
+
+    function M.show_ignore_text()
+        result:SetText('')
+        edit:SetText(export_ignored())
+        scroll:SetVerticalScroll(0)
+        dialog:Show()
+        edit:SetFocus()
+        edit:HighlightText()
+    end
+    dialog:HookScript('OnHide', function() edit:ClearFocus() end)
+    frame:HookScript('OnHide', function() dialog:Hide() end)
+end
+
 -- 0.9.1: the ignored items and words in a panel under the Ignored button: a click on one takes it
 -- back, and a word ("of the hierophant") ignores every item whose name holds it
 do
@@ -685,8 +782,16 @@ do
     gui.text_color(empty_note, aux.color.label.disabled)
     empty_note:SetText('Nothing ignored. Select a deal and press Ignore item.')
     local all_button = gui.button(menu, gui.font_size.small)
-    gui.set_size(all_button, MENU_W - 16, 22)
+    gui.set_size(all_button, (MENU_W - 20) / 2, 22)
     all_button:SetText('Unignore all')
+    local export_button = gui.button(menu, gui.font_size.small)
+    gui.set_size(export_button, (MENU_W - 20) / 2, 22)
+    export_button:SetText('Export / Import')
+    export_button:SetPoint('LEFT', all_button, 'RIGHT', 4, 0)
+    export_button:SetScript('OnClick', function()
+        menu:Hide()
+        show_ignore_text()
+    end)
 
     local function populate()
         for _, r in ipairs(rows) do r:Hide() end

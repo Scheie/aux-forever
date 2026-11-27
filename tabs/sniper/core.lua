@@ -1071,6 +1071,43 @@ function M.ignored_words()
     return aux.account_data.sniper_ignored_words
 end
 
+-- 0.9.1: the ignore list as text to copy, one entry a line ("word of the hierophant", "item
+-- 10104:of the elder = Councillor's Tunic of the Elder"); import_ignored reads it back
+function M.export_ignored()
+    local lines = {'# auxForever Sniper ignore list'}
+    for _, word in ipairs(aux.account_data.sniper_ignored_words) do
+        tinsert(lines, 'word ' .. word)
+    end
+    for _, item in ipairs(ignored_items()) do
+        tinsert(lines, 'item ' .. item.key .. ' = ' .. item.name)
+    end
+    return table.concat(lines, '\n')
+end
+
+-- adds the entries in an exported text (nothing is taken away); returns how many were new
+function M.import_ignored(text)
+    local added = 0
+    for raw in gmatch((text or '') .. '\n', '([^\r\n]*)\r?\n') do
+        local line = strtrim(raw)
+        local word = strmatch(line, '^word%s+(.+)$')
+        local key, name = strmatch(line, '^item%s+(.-)%s+=%s+(.+)$')
+        key = key or strmatch(line, '^item%s+(%S+)$')
+        if word then
+            if ignore_word(word) then added = added + 1 end
+        elseif key and not aux.account_data.sniper_ignored[key] then
+            aux.account_data.sniper_ignored[key] = name or key
+            added = added + 1
+            for i = #deals, 1, -1 do
+                if deals[i].deal_key == key or (deals[i].price_key or deals[i].deal_key) == key then
+                    tremove(deals, i)
+                end
+            end
+        end
+    end
+    update_deals()
+    return added
+end
+
 function M.ignored_count()
     return aux.size(aux.account_data.sniper_ignored) + #aux.account_data.sniper_ignored_words
 end
